@@ -1,3 +1,4 @@
+// server.js
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -6,6 +7,17 @@ require("dotenv").config();
 
 const connectDB = require("./config/db");
 const { initSocket } = require("./sockets/socket");
+
+// Routes
+const messageRoutes = require("./routes/messageRoutes");
+const chatRoutes = require("./routes/chatRoutes");
+const userRoutes = require("./routes/userRoutes");
+const contactRoutes = require("./routes/contactRoutes");
+const uploadRoutes = require("./routes/uploadRoutes");
+const groupRoutes = require("./routes/groupRoutes");
+const templateRoutes = require("./routes/templateRoutes");
+const campaignRoutes = require("./routes/campaignRoutes");
+const tagRoutes = require("./routes/tagRoutes");
 
 const app = express();
 const server = http.createServer(app);
@@ -24,63 +36,28 @@ connectDB();
 const io = initSocket(server);
 app.set("io", io);
 
-// ── Safe route loader ─────────────────────────────────────────
-function safeRequire(routePath) {
-  try {
-    const route = require(routePath);
-    if (typeof route !== "function" && typeof route !== "object") {
-      console.error(`❌ Invalid export from ${routePath}`);
-      return null;
-    }
-    return route;
-  } catch (err) {
-    console.error(`❌ Failed to load route ${routePath}:`, err.message);
-    return null;
-  }
-}
+// Routes
+app.use("/api/messages", messageRoutes);
+app.use("/api/chats", chatRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api", contactRoutes);
+app.use("/api/upload", uploadRoutes);
+app.use("/api", templateRoutes);
+app.use("/api", campaignRoutes);
+app.use("/api", tagRoutes); 
 
-const messageRoutes  = safeRequire("./routes/messageRoutes");
-const chatRoutes     = safeRequire("./routes/chatRoutes");
-const userRoutes     = safeRequire("./routes/userRoutes");
-const contactRoutes  = safeRequire("./routes/contactRoutes");
-const uploadRoutes   = safeRequire("./routes/uploadRoutes");
-const groupRoutes    = safeRequire("./routes/groupRoutes");
-const templateRoutes = safeRequire("./routes/templateRoutes");
-const campaignRoutes = safeRequire("./routes/campaignRoutes");
-const tagRoutes      = safeRequire("./routes/tagRoutes");
-
-// ── Mount routes (only if loaded successfully) ────────────────
-if (messageRoutes)  app.use("/api/messages", messageRoutes);
-if (chatRoutes)     app.use("/api/chats",    chatRoutes);
-if (userRoutes)     app.use("/api/users",    userRoutes);
-if (contactRoutes)  app.use("/api",          contactRoutes);
-if (uploadRoutes)   app.use("/api/upload",   uploadRoutes);
-if (templateRoutes) app.use("/api",          templateRoutes);
-if (campaignRoutes) app.use("/api",          campaignRoutes);
-if (tagRoutes)      app.use("/api",          tagRoutes);
-if (groupRoutes)    app.use("/api/groups",   groupRoutes);
+app.use("/api/groups", groupRoutes);
 
 // Test route
 app.get("/", (req, res) => {
   res.send("Backend running 🚀");
 });
 
-// ── Start cron jobs ───────────────────────────────────────────
-try {
-  require("./jobs/scheduler");
-  console.log("✅ scheduler loaded");
-} catch (err) {
-  console.error("❌ scheduler failed:", err.message);
-}
-
-try {
-  require("./jobs/campaignScheduler");
-  console.log("✅ campaignScheduler loaded");
-} catch (err) {
-  console.error("❌ campaignScheduler failed:", err.message);
-}
+// Start cron jobs (if any)
+require("./jobs/scheduler");
+require("./jobs/campaignScheduler");
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });

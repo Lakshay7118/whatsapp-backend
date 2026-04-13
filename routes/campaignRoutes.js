@@ -1,253 +1,137 @@
-const cron = require("node-cron");
+const express = require("express");
 const Campaign = require("../models/Campaign");
 const Contact = require("../models/Contact");
-const Template = require("../models/Template");
-const Message = require("../models/Message");
-const Chat = require("../models/chat");
-const resolveTemplate = require("../utils/resolveTemplate");
-const { getIO } = require("../sockets/socket");
+const router = express.Router();
 
-async function sendMessageToContact(contact, campaign, io) {
-  const creatorPhone = campaign.createdBy;
-  const targetPhone  = contact.mobile;
-
-  if (!targetPhone) {
-    console.warn("⚠️ No mobile for contact, skipping");
-    return;
-  }
-
-  // ── Find or create chat ───────────────────────────────────────
-  let chat = await Chat.findOne({
-    participants: { $all: [creatorPhone, targetPhone] },
-    isGroup: false,
-  });
-  if (!chat) {
-    console.log(`💬 Creating new chat between ${creatorPhone} and ${targetPhone}`);
-    chat = await Chat.create({
-      participants: [creatorPhone, targetPhone],
-      isGroup: false,
-      lastMessage: "",
-    });
-  }
-  console.log(`💬 Chat ID: ${chat._id}`);
-
-  // ── Fetch template ────────────────────────────────────────────
-  const template = await Template.findById(campaign.templateId);
-  if (!template) {
-    console.error(`❌ Template ${campaign.templateId} not found`);
-    return;
-  }
-  console.log(`📄 Template found: ${template.name}`);
-
-  // ── Convert Mongoose Map → plain object ───────────────────────
-  const templateVars =
-    template.variables instanceof Map
-      ? Object.fromEntries(template.variables)
-      : Object.fromEntries(Object.entries(template.variables || {}));
-
-  // ── Resolve variables ─────────────────────────────────────────
-  let resolvedText = resolveTemplate(template.format, templateVars, contact);
-
-  // Apply campaign-level variableMappings if present
-  if (campaign.variableValues && Object.keys(campaign.variableValues).length > 0) {
-    Object.entries(campaign.variableValues).forEach(([key, mapping]) => {
-      let resolvedValue = "";
-      if (mapping.type === "name") {
-        resolvedValue = (contact?.name && contact.name !== "UNKNOWN")
-          ? contact.name : "Customer";
-      } else if (mapping.type === "phone") {
-        resolvedValue = contact?.mobile || "";
-      } else if (mapping.type === "custom") {
-        resolvedValue = mapping.value || mapping.customValue || "";
+// Helper to compute next run date
+function computeNextRun(recurrence, baseDate = new Date()) {
+  const next = new Date(baseDate);
+  switch (recurrence.type) {
+    case "daily":
+      next.setDate(next.getDate() + recurrence.interval);
+      break;
+    case "weekly":
+      next.setDate(next.getDate() + (7 * recurrence.interval));
+      if (recurrence.dayOfWeek !== undefined) {
+        // adjust to specific day (simplified – you may want a full library)
+        const currentDay = next.getDay();
+        const diff = (recurrence.dayOfWeek - currentDay + 7) % 7;
+        next.setDate(next.getDate() + diff);
       }
-      resolvedText = resolvedText.replace(
-        new RegExp(`\\{\\{${key}\\}\\}`, "g"),
-        resolvedValue
-      );
-    });
+      break;
+    case "monthly":
+      next.setMonth(next.getMonth() + recurrence.interval);
+      if (recurrence.dayOfMonth) {
+        next.setDate(recurrence.dayOfMonth);
+      }
+      break;
+    case "hourly":
+      next.setHours(next.getHours() + recurrence.interval);
+      break;
+    default: // one‑time
+      return null;
   }
-
-  // Clean up any remaining unresolved placeholders
-  resolvedText = resolvedText.replace(/\{\{\d+\}\}/g, "");
-  console.log(`📝 Resolved text: ${resolvedText}`);
-
-  // ── Create message ────────────────────────────────────────────
-  const msg = await Message.create({
-    chatId:      chat._id,
-    sender:      creatorPhone,
-    text:        resolvedText,
-    messageType: "template",
-    fileUrl:     template.imageFile?.url  || template.videoFile?.url  || null,
-    fileName:    template.imageFile?.name || template.videoFile?.name || null,
-
-    templateMeta: {
-      templateId:   template._id,
-      header:       template.name     || "",
-      body:         resolvedText,
-      resolvedText: resolvedText,
-      footer:       template.footer   || "",
-      mediaType:    template.mediaType || "None",
-      mediaUrl:     template.imageFile?.url || template.videoFile?.url || null,
-      variables:    templateVars,
-      carouselItems: template.carouselItems || [],
-
-      actions: {
-        ctaButtons: (template.ctaButtons || []).map(btn => ({
-          id:      btn.id,
-          label:   btn.title  || btn.label || "",
-          url:     btn.value  || btn.url   || "",
-          btnType: btn.btnType || "",
-        })),
-        quickReplies: (template.quickReplies || []).map(r => ({
-          id:    r.id,
-          title: r.title || r.label || "",
-        })),
-        copyCodeButtons: (template.copyCodeButtons || []).map(btn => ({
-          id:    btn.id,
-          label: btn.title || btn.label || "",
-          value: btn.value || "",
-        })),
-        dropdownButtons: (template.dropdownButtons || []).map(dd => ({
-          id:            dd.id,
-          title:         dd.title        || "",
-          placeholder:   dd.placeholder  || "",
-          options:       dd.options      || "",
-          parsedOptions: dd.parsedOptions || [],
-          selected:      dd.selected     || "",
-        })),
-        inputFields: (template.inputFields || []).map(f => ({
-          id:          f.id,
-          label:       f.label       || "",
-          placeholder: f.placeholder || "",
-          value:       f.value       || "",
-        })),
-      },
-    },
-
-    status: "sent",
-    readBy: [],
-  });
-
-  console.log(`✅ Message created: ${msg._id}`);
-
-  // ── Emit socket events ────────────────────────────────────────
-  io.to(chat._id.toString()).emit("newMessage", msg);
-  io.to(targetPhone).emit("newMessage", msg);
-  io.to(creatorPhone).emit("newMessage", msg);
-  io.to(creatorPhone).emit("messageDelivered", {
-    messageId: msg._id,
-    chatId:    chat._id,
-  });
-
-  // ── Update chat last message ──────────────────────────────────
-  await Chat.findByIdAndUpdate(chat._id, {
-    lastMessage: resolvedText,
-    updatedAt:   new Date(),
-  });
-
-  return msg;
+  return next;
 }
 
-async function processCampaigns() {
+// POST /api/campaigns
+router.post("/campaigns", async (req, res) => {
   try {
-    const now = new Date();
-    console.log("⏰ Scheduler tick:", now.toISOString());
+    const {
+      campaignName,
+      messageType,
+      audienceType,
+      tagIds,
+      contactIds,
+      groupIds,
+      manualNumbers,
+      templateId,
+      scheduledDateTime,
+      recurrence,
+      variableValues,
+      messagePreview,
+      createdBy,
+    } = req.body;
 
-    const campaigns = await Campaign.find({
-      status:  "scheduled",
-      nextRun: { $lte: now },
-    });
-
-    console.log(`📋 Due campaigns: ${campaigns.length}`);
-
-    // Debug log all scheduled campaigns
-    const allScheduled = await Campaign.find({ status: "scheduled" });
-    console.log("All scheduled:", allScheduled.map(c => ({
-      name:    c.campaignName,
-      nextRun: c.nextRun,
-      isDue:   new Date(c.nextRun) <= now,
-    })));
-
-    for (const campaign of campaigns) {
-      console.log(`🚀 Processing: "${campaign.campaignName}" | audience: ${campaign.audienceType}`);
-
-      let recipients = [];
-
-      try {
-        if (campaign.audienceType === "tags") {
-          recipients = await Contact.find({ tag: { $in: campaign.tagIds } }); // ✅ fixed: tag not tags
-          console.log(`🏷️ Tag recipients: ${recipients.length}`);
-
-        } else if (campaign.audienceType === "contact") {
-          recipients = await Contact.find({ _id: { $in: campaign.contactIds } });
-          console.log(`👤 Contact recipients: ${recipients.length}`);
-
-        } else if (campaign.audienceType === "group") {
-          const Chat = require("../models/chat");
-          const groups = await Chat.find({
-            _id:     { $in: campaign.groupIds },
-            isGroup: true,
-          });
-          const phones = groups.flatMap(g => g.participants || []);
-          recipients = await Contact.find({ mobile: { $in: phones } });
-          console.log(`👥 Group recipients: ${recipients.length}`);
-
-        } else if (campaign.audienceType === "manual") {
-          recipients = campaign.manualNumbers.map(num => ({
-            mobile: num,
-            name:   num,
-          }));
-          console.log(`📱 Manual recipients: ${recipients.length}`);
-        }
-
-      } catch (audienceErr) {
-        console.error("❌ Error resolving audience:", audienceErr.message);
-        continue;
-      }
-
-      if (recipients.length === 0) {
-        console.warn(`⚠️ No recipients found for campaign: ${campaign.campaignName}`);
-        // Still mark as sent so it doesn't loop
-        campaign.status = "sent";
-        await campaign.save();
-        continue;
-      }
-
-      const io = getIO();
-
-      for (const recipient of recipients) {
-        try {
-          console.log(`📨 Sending to: ${recipient.mobile}`);
-          await sendMessageToContact(recipient, campaign, io);
-          campaign.sentCount += 1;
-          console.log(`✅ Sent to: ${recipient.mobile}`);
-        } catch (err) {
-          console.error(`❌ Failed for ${recipient.mobile}:`, err.message);
-          campaign.errorLog += `\n${recipient.mobile}: ${err.message}`;
-        }
-      }
-
-      // ── Update campaign status ──────────────────────────────────
-      if (campaign.recurrence.type === "one-time") {
-        campaign.status = "sent";
-      } else {
-        campaign.nextRun = computeNextRun(campaign.recurrence, new Date());
-        campaign.status  = "scheduled";
-      }
-
-      try {
-        await campaign.save();
-        console.log(`💾 Campaign "${campaign.campaignName}" → status: ${campaign.status}`);
-      } catch (saveErr) {
-        console.error("❌ Failed to save campaign:", saveErr.message);
-      }
+    if (!campaignName) {
+      return res.status(400).json({ error: "campaignName is required" });
     }
 
-  } catch (err) {
-    console.error("❌ processCampaigns error:", err.message);
-  }
-}
+    if (!["tags", "contact", "group", "manual"].includes(audienceType)) {
+      return res.status(400).json({ error: "Invalid audienceType" });
+    }
 
+    // ✅ validation
+    if (audienceType === "tags" && (!tagIds || tagIds.length === 0)) {
+      return res.status(400).json({ error: "Select at least one tag" });
+    }
+
+    if (audienceType === "contact" && (!contactIds || contactIds.length === 0)) {
+      return res.status(400).json({ error: "Select at least one contact" });
+    }
+
+    if (audienceType === "group" && (!groupIds || groupIds.length === 0)) {
+      return res.status(400).json({ error: "Select at least one group" });
+    }
+
+    if (audienceType === "manual" && (!manualNumbers || manualNumbers.length === 0)) {
+      return res.status(400).json({ error: "Enter manual numbers" });
+    }
+
+    let nextRun = null;
+    const recurrenceObj = recurrence || { type: "one-time" };
+
+    if (recurrenceObj.type === "one-time") {
+      const scheduledDate = new Date(scheduledDateTime);
+      if (isNaN(scheduledDate)) {
+        return res.status(400).json({ error: "Invalid date" });
+      }
+      nextRun = scheduledDate;
+    } else {
+      nextRun = computeNextRun(recurrenceObj, new Date());
+    }
+
+    const campaign = new Campaign({
+      campaignName,
+      messageType,
+      audienceType,
+      tagIds: tagIds || [],
+      contactIds: contactIds || [],
+      groupIds: groupIds || [],
+      manualNumbers: manualNumbers || [],
+      templateId,
+      scheduledDateTime: nextRun,
+      recurrence: recurrenceObj,
+      variableValues: variableValues || {},
+      messagePreview,
+      createdBy,
+      status: "scheduled",
+      nextRun,
+    });
+
+    await campaign.save();
+
+    res.status(201).json({
+      success: true,
+      campaign,
+    });
+  } catch (error) {
+    console.error("Campaign creation error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/campaigns
+router.get("/campaigns", async (req, res) => {
+  try {
+    const campaigns = await Campaign.find().sort({ scheduledDateTime: -1 });
+    res.json({ success: true, campaigns });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper: compute next run (same as in scheduler)
 function computeNextRun(recurrence, baseDate = new Date()) {
   const next = new Date(baseDate);
   switch (recurrence.type) {
@@ -264,7 +148,9 @@ function computeNextRun(recurrence, baseDate = new Date()) {
       break;
     case "monthly":
       next.setMonth(next.getMonth() + recurrence.interval);
-      if (recurrence.dayOfMonth) next.setDate(recurrence.dayOfMonth);
+      if (recurrence.dayOfMonth) {
+        next.setDate(recurrence.dayOfMonth);
+      }
       break;
     case "hourly":
       next.setHours(next.getHours() + recurrence.interval);
@@ -275,9 +161,50 @@ function computeNextRun(recurrence, baseDate = new Date()) {
   return next;
 }
 
-// Run every minute
-cron.schedule("* * * * *", () => {
-  processCampaigns().catch(console.error);
+// DELETE campaign
+router.delete("/campaigns/:id", async (req, res) => {
+  try {
+    const deleted = await Campaign.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: "Campaign not found" });
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Delete campaign error:", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
-module.exports = { processCampaigns };
+// PATCH /api/campaigns/:id/status – pause/resume
+router.patch("/campaigns/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ["active", "paused", "scheduled", "sent"];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    const campaign = await Campaign.findById(req.params.id);
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    campaign.status = status;
+
+    // If resuming from paused → scheduled, recalc nextRun if needed
+    if (status === "scheduled" || status === "active") {
+      if (!campaign.nextRun || new Date(campaign.nextRun) < new Date()) {
+        // Only recalc for recurring campaigns
+        if (campaign.recurrence && campaign.recurrence.type !== "one-time") {
+          campaign.nextRun = computeNextRun(campaign.recurrence, new Date());
+        }
+      }
+    }
+
+    await campaign.save();
+    res.json({ success: true, campaign });
+  } catch (error) {
+    console.error("Update campaign status error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+module.exports = router;
