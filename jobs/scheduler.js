@@ -2,7 +2,7 @@ const cron = require("node-cron");
 const Campaign = require("../models/Campaign");
 const Message = require("../models/Message");
 const Contact = require("../models/Contact");
-const Chat = require("../models/Chat");
+const Chat = require("../models/chat");
 
 // ⏱ runs every 10 seconds
 cron.schedule("*/10 * * * * *", async () => {
