@@ -161,7 +161,7 @@ async function processCampaigns() {
     let recipients = [];
 
     if (campaign.audienceType === "tags") {
-      recipients = await Contact.find({ tags: { $in: campaign.tagIds } });
+      recipients = await Contact.find({ tag: { $in: campaign.tagIds } });
     } else if (campaign.audienceType === "contact") {
       recipients = await Contact.find({ _id: { $in: campaign.contactIds } });
     } else if (campaign.audienceType === "group") {
