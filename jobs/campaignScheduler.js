@@ -166,7 +166,7 @@ async function processCampaigns() {
       recipients = await Contact.find({ _id: { $in: campaign.contactIds } });
     } else if (campaign.audienceType === "group") {
       // ✅ group support was missing
-      const Group = require("../models/Group");
+     
       const groups = await Group.find({ _id: { $in: campaign.groupIds } });
       const phones = groups.flatMap(g => g.participants || []);
       recipients = await Contact.find({ mobile: { $in: phones } });
