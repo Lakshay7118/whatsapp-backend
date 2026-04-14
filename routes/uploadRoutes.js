@@ -1,28 +1,53 @@
-// routes/uploadRoutes.js
 const express = require("express");
 const multer = require("multer");
-const path = require("path");
 const router = express.Router();
+const cloudinary = require("../config/cloudinary");
 
-// Configure storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
-
+// ✅ Use memory storage (not disk)
+const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// Upload endpoint
-router.post("/", upload.single("file"), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+// 🔥 Upload endpoint (Cloudinary)
+router.post("/", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
 
-  const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
-  res.json({
-    fileUrl,
-    fileName: req.file.originalname,
-    fileSize: req.file.size,
-    messageType: req.file.mimetype.startsWith("image/") ? "image" : "file"
-  });
+    const file = req.file;
+
+    // 🔥 Upload to Cloudinary
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: "auto", // supports image, video, pdf etc.
+      },
+      (error, result) => {
+        if (error) {
+          console.error("❌ Cloudinary Error:", error);
+          return res.status(500).json({ error: "Upload failed" });
+        }
+
+        // ✅ Return cloud URL
+        res.json({
+          fileUrl: result.secure_url,
+          fileName: file.originalname,
+          fileSize: file.size,
+          messageType: file.mimetype.startsWith("image/")
+            ? "image"
+            : file.mimetype.startsWith("video/")
+            ? "video"
+            : "file",
+        });
+      }
+    );
+
+    // 🔥 Send file buffer to cloudinary
+    stream.end(file.buffer);
+
+  } catch (err) {
+    console.error("❌ Upload Error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;

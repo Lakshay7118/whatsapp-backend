@@ -1,25 +1,12 @@
 const express = require("express");
 const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
 const Template = require("../models/Template");
+const cloudinary = require("../config/cloudinary");
 
 const router = express.Router();
 
-// Configure multer storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, "../uploads/templates");
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  },
-});
-
+// ✅ Use memory storage (not disk)
+const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
 // Helper to safely parse JSON strings from FormData
@@ -33,7 +20,23 @@ const safeParse = (value) => {
   }
 };
 
-// POST /api/templates – create a new template
+// 🔥 Upload helper (Cloudinary)
+const uploadToCloudinary = (buffer) => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { resource_type: "auto" },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+    stream.end(buffer);
+  });
+};
+
+// =======================
+// ✅ CREATE TEMPLATE
+// =======================
 router.post("/templates", upload.single("mediaFile"), async (req, res) => {
   try {
     const {
@@ -48,12 +51,12 @@ router.post("/templates", upload.single("mediaFile"), async (req, res) => {
       createdBy,
     } = req.body;
 
-    // Validate required fields
     if (!name || !category || !format || !createdBy) {
-      return res.status(400).json({ error: "Missing required fields: name, category, format, createdBy" });
+      return res.status(400).json({
+        error: "Missing required fields: name, category, format, createdBy",
+      });
     }
 
-    // Parse JSON fields (sent as strings)
     let imageFile = safeParse(req.body.imageFile);
     let videoFile = safeParse(req.body.videoFile);
     let carouselItems = safeParse(req.body.carouselItems) || [];
@@ -62,19 +65,20 @@ router.post("/templates", upload.single("mediaFile"), async (req, res) => {
     let copyCodeButtons = safeParse(req.body.copyCodeButtons) || [];
     let dropdownButtons = safeParse(req.body.dropdownButtons) || [];
     let inputFields = safeParse(req.body.inputFields) || [];
-    let variables = safeParse(req.body.variables) || {};  // ✅ ADDED
+    let variables = safeParse(req.body.variables) || {};
 
-    // Transform fields to match the schema
+    // transform fields
     if (imageFile && imageFile.type) {
       imageFile.mimeType = imageFile.type;
       delete imageFile.type;
     }
+
     if (videoFile && videoFile.type) {
       videoFile.mimeType = videoFile.type;
       delete videoFile.type;
     }
 
-    carouselItems = carouselItems.map(item => {
+    carouselItems = carouselItems.map((item) => {
       if (item.mediaType) {
         item.mimeType = item.mediaType;
         delete item.mediaType;
@@ -82,32 +86,32 @@ router.post("/templates", upload.single("mediaFile"), async (req, res) => {
       return item;
     });
 
-    ctaButtons = ctaButtons.map(btn => ({
+    ctaButtons = ctaButtons.map((btn) => ({
       ...btn,
       btnType: btn.type,
       type: undefined,
     }));
 
-    // Handle uploaded media file
+    // 🔥 Upload to Cloudinary
     if (req.file) {
-      const fileUrl = `/uploads/templates/${req.file.filename}`;
+      const result = await uploadToCloudinary(req.file.buffer);
+
       if (mediaType === "Image") {
         imageFile = {
           name: req.file.originalname,
           mimeType: req.file.mimetype,
-          url: fileUrl,
+          url: result.secure_url,
         };
       } else if (mediaType === "Video") {
         videoFile = {
           name: req.file.originalname,
           mimeType: req.file.mimetype,
-          url: fileUrl,
+          url: result.secure_url,
         };
       }
     }
 
-    // Build the final document
-    const templateData = {
+    const template = new Template({
       name,
       category,
       language: language || "English",
@@ -124,12 +128,11 @@ router.post("/templates", upload.single("mediaFile"), async (req, res) => {
       copyCodeButtons,
       dropdownButtons,
       inputFields,
-      variables,        // ✅ ADDED
+      variables,
       status: "DRAFT",
       createdBy,
-    };
+    });
 
-    const template = new Template(templateData);
     await template.save();
 
     res.status(201).json({
@@ -143,7 +146,9 @@ router.post("/templates", upload.single("mediaFile"), async (req, res) => {
   }
 });
 
-// GET all templates
+// =======================
+// ✅ GET ALL
+// =======================
 router.get("/templates", async (req, res) => {
   try {
     const templates = await Template.find().sort({ createdAt: -1 });
@@ -153,14 +158,25 @@ router.get("/templates", async (req, res) => {
   }
 });
 
-// PUT /api/templates/:id
+// =======================
+// ✅ UPDATE TEMPLATE
+// =======================
 router.put("/templates/:id", upload.single("mediaFile"), async (req, res) => {
   try {
     const templateId = req.params.id;
     const existing = await Template.findById(templateId);
     if (!existing) return res.status(404).json({ error: "Template not found" });
 
-    const { name, category, language, type, format, footer, actionType, mediaType, createdBy } = req.body;
+    const {
+      name,
+      category,
+      language,
+      type,
+      format,
+      footer,
+      actionType,
+      mediaType,
+    } = req.body;
 
     let imageFile = safeParse(req.body.imageFile);
     let videoFile = safeParse(req.body.videoFile);
@@ -170,50 +186,80 @@ router.put("/templates/:id", upload.single("mediaFile"), async (req, res) => {
     let copyCodeButtons = safeParse(req.body.copyCodeButtons) || [];
     let dropdownButtons = safeParse(req.body.dropdownButtons) || [];
     let inputFields = safeParse(req.body.inputFields) || [];
-    let variables = safeParse(req.body.variables) || {};  // ✅ ADDED
+    let variables = safeParse(req.body.variables) || {};
 
-    // transform fields same as POST
-    if (imageFile && imageFile.type) { imageFile.mimeType = imageFile.type; delete imageFile.type; }
-    if (videoFile && videoFile.type) { videoFile.mimeType = videoFile.type; delete videoFile.type; }
+    // transform fields
+    if (imageFile && imageFile.type) {
+      imageFile.mimeType = imageFile.type;
+      delete imageFile.type;
+    }
 
-    carouselItems = carouselItems.map(item => {
-      if (item.mediaType) { item.mimeType = item.mediaType; delete item.mediaType; }
+    if (videoFile && videoFile.type) {
+      videoFile.mimeType = videoFile.type;
+      delete videoFile.type;
+    }
+
+    carouselItems = carouselItems.map((item) => {
+      if (item.mediaType) {
+        item.mimeType = item.mediaType;
+        delete item.mediaType;
+      }
       return item;
     });
 
-    ctaButtons = ctaButtons.map(btn => ({ ...btn, btnType: btn.type, type: undefined }));
+    ctaButtons = ctaButtons.map((btn) => ({
+      ...btn,
+      btnType: btn.type,
+      type: undefined,
+    }));
 
+    // 🔥 Upload new media (if exists)
     if (req.file) {
-      const fileUrl = `/uploads/templates/${req.file.filename}`;
-      if (mediaType === "Image") imageFile = { name: req.file.originalname, mimeType: req.file.mimetype, url: fileUrl };
-      else if (mediaType === "Video") videoFile = { name: req.file.originalname, mimeType: req.file.mimetype, url: fileUrl };
+      const result = await uploadToCloudinary(req.file.buffer);
+
+      if (mediaType === "Image") {
+        imageFile = {
+          name: req.file.originalname,
+          mimeType: req.file.mimetype,
+          url: result.secure_url,
+        };
+      } else if (mediaType === "Video") {
+        videoFile = {
+          name: req.file.originalname,
+          mimeType: req.file.mimetype,
+          url: result.secure_url,
+        };
+      }
     } else {
-      if (mediaType === "Image" && existing.imageFile) imageFile = existing.imageFile;
-      if (mediaType === "Video" && existing.videoFile) videoFile = existing.videoFile;
+      if (mediaType === "Image") imageFile = existing.imageFile;
+      if (mediaType === "Video") videoFile = existing.videoFile;
     }
 
-    const updateData = {
-      name,
-      category,
-      language: language || "English",
-      type: type || "Text",
-      format,
-      footer: footer || "",
-      actionType: actionType || "none",
-      mediaType: mediaType || "None",
-      imageFile: imageFile || null,
-      videoFile: videoFile || null,
-      carouselItems,
-      ctaButtons,
-      quickReplies,
-      copyCodeButtons,
-      dropdownButtons,
-      inputFields,
-      variables,        // ✅ ADDED
-      updatedAt: Date.now(),
-    };
+    const updated = await Template.findByIdAndUpdate(
+      templateId,
+      {
+        name,
+        category,
+        language: language || "English",
+        type: type || "Text",
+        format,
+        footer: footer || "",
+        actionType: actionType || "none",
+        mediaType: mediaType || "None",
+        imageFile,
+        videoFile,
+        carouselItems,
+        ctaButtons,
+        quickReplies,
+        copyCodeButtons,
+        dropdownButtons,
+        inputFields,
+        variables,
+        updatedAt: Date.now(),
+      },
+      { new: true }
+    );
 
-    const updated = await Template.findByIdAndUpdate(templateId, updateData, { new: true });
     res.json({ success: true, template: updated });
   } catch (error) {
     console.error("Template update error:", error);
@@ -221,7 +267,9 @@ router.put("/templates/:id", upload.single("mediaFile"), async (req, res) => {
   }
 });
 
-// GET single template
+// =======================
+// ✅ GET SINGLE
+// =======================
 router.get("/templates/:id", async (req, res) => {
   try {
     const template = await Template.findById(req.params.id);
@@ -232,7 +280,9 @@ router.get("/templates/:id", async (req, res) => {
   }
 });
 
-// DELETE template
+// =======================
+// ✅ DELETE
+// =======================
 router.delete("/templates/:id", async (req, res) => {
   try {
     const deleted = await Template.findByIdAndDelete(req.params.id);
