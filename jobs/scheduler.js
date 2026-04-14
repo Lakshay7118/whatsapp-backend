@@ -3,15 +3,38 @@ const Campaign = require("../models/Campaign");
 const Message = require("../models/Message");
 const Contact = require("../models/Contact");
 const Chat = require("../models/chat");
+const Template = require("../models/Template");
+
+// 🔥 TEMPLATE RESOLVER
+function resolveTemplate(template, variables, contact) {
+  let text = template.format;
+
+  if (!variables) return text;
+
+  Object.entries(variables).forEach(([key, mapping]) => {
+    let value = "";
+
+    if (mapping.type === "name") {
+      value = contact.name || "Customer";
+    } else if (mapping.type === "phone") {
+      value = contact.mobile || "";
+    } else if (mapping.type === "custom") {
+      value = mapping.value || "5"; // ✅ fallback
+    }
+
+    console.log(`➡️ {{${key}}} →`, value);
+
+    text = text.replace(new RegExp(`{{${key}}}`, "g"), value);
+  });
+
+  return text;
+}
 
 // ⏱ runs every 10 seconds
 cron.schedule("*/10 * * * * *", async () => {
   try {
-    console.log("⏱ Cron running...");
-
     const now = new Date();
 
-    // ✅ 1. FIND campaigns to run
     const campaigns = await Campaign.find({
       status: "scheduled",
       scheduledDateTime: { $lte: now },
@@ -21,14 +44,11 @@ cron.schedule("*/10 * * * * *", async () => {
 
     console.log(`🚀 Found ${campaigns.length} campaigns`);
 
-    // ✅ 2. PROCESS EACH CAMPAIGN
     for (let campaign of campaigns) {
       try {
         console.log("📤 Running campaign:", campaign._id);
 
         let contacts = [];
-
-        // 🔥 GET AUDIENCE
 
         // 👉 TAGS
         if (campaign.audienceType === "tags") {
@@ -38,13 +58,13 @@ cron.schedule("*/10 * * * * *", async () => {
         }
 
         // 👉 CONTACTS
-        else if (campaign.audienceType === "contacts") {
+        else if (campaign.audienceType === "contact") {
           contacts = await Contact.find({
             _id: { $in: campaign.contactIds },
           });
         }
 
-        // 👉 MANUAL NUMBERS
+        // 👉 MANUAL
         else if (campaign.audienceType === "manual") {
           contacts = campaign.manualNumbers.map((num) => ({
             mobile: num,
@@ -54,10 +74,16 @@ cron.schedule("*/10 * * * * *", async () => {
 
         console.log(`👥 Found ${contacts.length} contacts`);
 
-        // ✅ 3. SEND MESSAGE TO EACH CONTACT
+        // 🔥 GET TEMPLATE ONCE
+        const template = await Template.findById(campaign.templateId);
+        if (!template) {
+          console.error("❌ Template not found");
+          continue;
+        }
+
         for (let contact of contacts) {
           try {
-            // 🔥 find or create chat
+            // 🔥 create chat
             let chat = await Chat.findOne({
               participants: { $all: [campaign.createdBy, contact.mobile] },
             });
@@ -70,28 +96,36 @@ cron.schedule("*/10 * * * * *", async () => {
               });
             }
 
-            // 🔥 CREATE MESSAGE (template type)
+            // 🔥 RESOLVE MESSAGE HERE (IMPORTANT FIX)
+            const finalText = resolveTemplate(
+              template,
+              campaign.variableValues,
+              contact
+            );
+
+            console.log("✅ FINAL MESSAGE:", finalText);
+
             await Message.create({
-              chatId: chat._id,
-              sender: campaign.createdBy,
-              messageType: "template",
+  chatId: chat._id,
+  sender: campaign.createdBy,
 
-              templateMeta: {
-                templateId: campaign.templateId,
-                body: campaign.messagePreview,
-                variables: campaign.variableValues || {},
-              },
+  text: finalText, // ✅ ADD THIS (IMPORTANT)
 
-              status: "sent",
-              sentAt: new Date(),
-            });
+  messageType: "template",
+
+  templateMeta: {
+    body: finalText,
+  },
+
+  status: "sent",
+});
 
           } catch (err) {
             console.error("❌ Contact send failed:", err.message);
           }
         }
 
-        // ✅ 4. UPDATE CAMPAIGN STATUS
+        // ✅ update campaign
         campaign.status = "completed";
         campaign.sentCount = contacts.length;
         campaign.updatedAt = new Date();
@@ -105,7 +139,7 @@ cron.schedule("*/10 * * * * *", async () => {
       }
     }
 
-    // ✅ OPTIONAL: delivery simulation
+    // ✅ simulate delivery
     const result = await Message.updateMany(
       { status: "sent" },
       {

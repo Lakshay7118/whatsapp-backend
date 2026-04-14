@@ -35,6 +35,7 @@ function computeNextRun(recurrence, baseDate = new Date()) {
 }
 
 // POST /api/campaigns
+// POST /api/campaigns
 router.post("/campaigns", async (req, res) => {
   try {
     const {
@@ -48,7 +49,7 @@ router.post("/campaigns", async (req, res) => {
       templateId,
       scheduledDateTime,
       recurrence,
-      variableValues,
+      variableValues: requestVariableValues,
       messagePreview,
       createdBy,
     } = req.body;
@@ -91,6 +92,34 @@ router.post("/campaigns", async (req, res) => {
       nextRun = computeNextRun(recurrenceObj, new Date());
     }
 
+    // ─── ✅ FIX: Merge template default variable values ─────────────────────────
+    let finalVariableValues = requestVariableValues || {};
+
+    if (templateId) {
+      const Template = require("../models/Template");
+      const template = await Template.findById(templateId).lean();
+      
+      if (template && template.variables) {
+        // For each variable defined in the template
+        for (const [key, varDef] of Object.entries(template.variables)) {
+          // If the request didn't provide this variable, use template's default
+          if (!finalVariableValues[key]) {
+            finalVariableValues[key] = {
+              type: varDef.type,
+              value: varDef.value || "",
+            };
+          } else {
+            // Ensure type is preserved (request may only have value)
+            finalVariableValues[key].type = varDef.type;
+            // If value is empty, fall back to template default
+            if (!finalVariableValues[key].value) {
+              finalVariableValues[key].value = varDef.value || "";
+            }
+          }
+        }
+      }
+    }
+
     const campaign = new Campaign({
       campaignName,
       messageType,
@@ -102,7 +131,7 @@ router.post("/campaigns", async (req, res) => {
       templateId,
       scheduledDateTime: nextRun,
       recurrence: recurrenceObj,
-      variableValues: variableValues || {},
+      variableValues: finalVariableValues,   // 👈 Use merged values
       messagePreview,
       createdBy,
       status: "scheduled",

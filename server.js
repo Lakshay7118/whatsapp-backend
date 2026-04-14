@@ -54,7 +54,7 @@ app.get("/", (req, res) => {
 });
 
 // Start cron jobs (if any)
-require("./jobs/scheduler");
+
 require("./jobs/campaignScheduler");
 
 const PORT = process.env.PORT || 5000;

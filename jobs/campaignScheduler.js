@@ -4,8 +4,51 @@ const Contact = require("../models/Contact");
 const Template = require("../models/Template");
 const Message = require("../models/Message");
 const Chat = require("../models/chat");
-const resolveTemplate = require("../utils/resolveTemplate");
 const { getIO } = require("../sockets/socket");
+
+// 🔥 SAFE TEMPLATE RESOLVER
+function resolveTemplateText(templateText, variableValues, contact) {
+  if (!templateText) return "";
+  let text = String(templateText);
+
+  if (!variableValues || Object.keys(variableValues).length === 0) {
+    console.warn("⚠️ No variableValues provided");
+    return text;
+  }
+
+  console.log("🔄 Original text:", text);
+  console.log("📋 variableValues:", JSON.stringify(variableValues, null, 2));
+
+  Object.entries(variableValues).forEach(([key, mapping]) => {
+    let value = "";
+
+    // Determine value
+    if (mapping.type === "name") {
+      value = contact.name || "Customer";
+    } else if (mapping.type === "phone") {
+      value = contact.mobile || "";
+    } else if (mapping.type === "custom" || mapping.type === "manual") {
+      value = mapping.value || "";
+    }
+
+    // Fallback
+    if (!value || value.trim() === "") {
+      console.warn(`⚠️ Empty value for {{${key}}}, using "N/A"`);
+      value = "N/A";
+    }
+
+    // ✅ ESCAPED CURLY BRACES FOR REGEX
+    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\{\\{${escapedKey}\\}\\}`, "g");
+
+    const before = text;
+    text = text.replace(regex, value);
+    console.log(`🔁 {{${key}}} → "${value}" (replaced: ${before !== text})`);
+  });
+
+  console.log("✅ FINAL RESOLVED TEXT:", text);
+  return text;
+}
 
 // 🔥 SEND MESSAGE FUNCTION
 async function sendMessageToContact(contact, campaign, io) {
@@ -23,34 +66,73 @@ async function sendMessageToContact(contact, campaign, io) {
     });
   }
 
-  // get template
-  const template = await Template.findById(campaign.templateId);
-  if (!template) return;
-
-  // resolve variables
-  let text = template.format;
-
-  if (campaign.variableValues) {
-    Object.entries(campaign.variableValues).forEach(([key, mapping]) => {
-      let value = "";
-
-      if (mapping.type === "name") value = contact.name || "Customer";
-      else if (mapping.type === "phone") value = contact.mobile;
-      else value = mapping.value || "";
-
-      text = text.replace(new RegExp(`{{${key}}}`, "g"), value);
-    });
+  // get template with all fields
+  const template = await Template.findById(campaign.templateId).lean();
+  if (!template) {
+    console.error("❌ Template not found");
+    return;
   }
 
-  text = text.replace(/\{\{\d+\}\}/g, "");
+  console.log("📦 CAMPAIGN VARIABLE VALUES:", campaign.variableValues);
+  console.log("👤 CONTACT:", contact.name, contact.mobile);
+  console.log("🧾 TEMPLATE:", template.name);
 
-  // create message
+  // Resolve body text (format) with variables
+  const resolvedBody = resolveTemplateText(
+    template.format || "",
+    campaign.variableValues,
+    contact
+  );
+
+  // Resolve header (using template.name as the header text, just like frontend does)
+  const resolvedHeader = resolveTemplateText(
+    template.name || "",
+    campaign.variableValues,
+    contact
+  );
+
+  // Resolve footer (if it exists)
+  const resolvedFooter = template.footer
+    ? resolveTemplateText(template.footer, campaign.variableValues, contact)
+    : "";
+
+  // Extract media URL based on mediaType
+  let mediaUrl = null;
+  if (template.mediaType === "Image" && template.imageFile?.url) {
+    mediaUrl = template.imageFile.url;
+  } else if (template.mediaType === "Video" && template.videoFile?.url) {
+    mediaUrl = template.videoFile.url;
+  }
+
+  // Build templateMeta exactly as frontend expects (matching sendTemplate in LiveChatPage)
+  const templateMeta = {
+    templateId: template._id,
+    header: resolvedHeader,                 // ✅ Now using template.name
+    body: resolvedBody,
+    footer: resolvedFooter,
+    resolvedText: resolvedBody,
+    mediaType: template.mediaType || "None",
+    mediaUrl: mediaUrl,
+    variables: campaign.variableValues || {},
+    actions: {
+      ctaButtons: template.ctaButtons || [],
+      quickReplies: template.quickReplies || [],
+      copyCodeButtons: template.copyCodeButtons || [],
+      dropdownButtons: template.dropdownButtons || [],
+      inputFields: template.inputFields || [],
+    },
+    carouselItems: template.carouselItems || [],
+  };
+
+  // create message WITH templateMeta
   const msg = await Message.create({
     chatId: chat._id,
     sender: creatorPhone,
-    text,
+    text: resolvedBody,                // fallback plain text
     messageType: "template",
     status: "sent",
+    sentAt: new Date(),
+    templateMeta,                      // <-- now fully populated
   });
 
   // socket emit
@@ -66,7 +148,7 @@ async function processCampaigns() {
 
   const campaigns = await Campaign.find({
     status: "scheduled",
-    scheduledDateTime: { $lte: now }, // ✅ FIXED
+    scheduledDateTime: { $lte: now },
   });
 
   if (campaigns.length === 0) return;
@@ -92,7 +174,7 @@ async function processCampaigns() {
       });
     }
 
-    // ❌ SKIP GROUP (for now)
+    // ❌ GROUP (skip)
     else if (campaign.audienceType === "group") {
       console.log("⚠️ Group sending not implemented yet");
       continue;
@@ -110,16 +192,16 @@ async function processCampaigns() {
 
     const io = getIO();
 
-    for (const r of recipients) {
+    for (const contact of recipients) {
       try {
-        await sendMessageToContact(r, campaign, io);
+        await sendMessageToContact(contact, campaign, io);
         campaign.sentCount += 1;
       } catch (err) {
         console.error("❌ Send failed:", err.message);
       }
     }
 
-    // ✅ FIX STATUS
+    // ✅ mark campaign completed
     campaign.status = "sent";
     await campaign.save();
 
@@ -129,7 +211,6 @@ async function processCampaigns() {
 
 // ⏱ run every 10 sec
 cron.schedule("*/10 * * * * *", () => {
-  console.log("⏱ Cron running...");
   processCampaigns().catch(console.error);
 });
 
