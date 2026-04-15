@@ -22,9 +22,12 @@ const tagRoutes = require("./routes/tagRoutes");
 const app = express();
 const server = http.createServer(app);
 
-// Middleware
+// 🔥 CORS
 app.use(cors({ origin: "*" }));
-app.use(express.json());
+
+// 🔥 IMPORTANT: Increase body size limit (FIX 413 ERROR)
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Serve uploaded files statically
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
@@ -44,8 +47,7 @@ app.use("/api", contactRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api", templateRoutes);
 app.use("/api", campaignRoutes);
-app.use("/api", tagRoutes); 
-
+app.use("/api", tagRoutes);
 app.use("/api/groups", groupRoutes);
 
 // Test route
@@ -53,11 +55,11 @@ app.get("/", (req, res) => {
   res.send("Backend running 🚀");
 });
 
-// Start cron jobs (if any)
-
+// Start cron jobs
 require("./jobs/campaignScheduler");
 
 const PORT = process.env.PORT || 5000;
+
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
