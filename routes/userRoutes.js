@@ -1,12 +1,13 @@
 const express = require("express");
 const router = express.Router();
 const User = require("../models/Users");
-const Contact = require("../models/Contact"); // ✅ ADD THIS
+const Contact = require("../models/Contact");
+const generateToken = require("../utils/generateToken");
 
 // LOGIN (ONLY ALLOWED USERS)
 router.post("/login", async (req, res) => {
   try {
-    const { name, phone } = req.body;
+    const { phone } = req.body;
 
     if (!phone) {
       return res.status(400).json({ error: "Phone is required" });
@@ -26,14 +27,26 @@ router.post("/login", async (req, res) => {
 
     if (!user) {
       user = await User.create({
-        name: contact.name, // use admin name
+        name: contact.name,
         phone: contact.mobile,
       });
     }
 
-    res.json(user);
+    // 🔐 STEP 3: GENERATE JWT TOKEN
+    const token = generateToken(user);
+
+    // ✅ SEND TOKEN + USER
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        phone: user.phone,
+      },
+    });
 
   } catch (err) {
+    console.error("Login Error:", err); // 👈 better debugging
     res.status(500).json({ error: err.message });
   }
 });

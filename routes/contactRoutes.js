@@ -1,13 +1,18 @@
 const express = require("express");
 const Contact = require("../models/Contact");
+const protect = require("../middleware/authMiddleware"); // ✅ JWT
 const router = express.Router();
 
-// GET all contacts (optionally filter by tag)
-router.get("/contacts", async (req, res) => {
+// =======================
+// ✅ GET ALL CONTACTS
+// =======================
+router.get("/contacts", protect, async (req, res) => {
   try {
     const { tag } = req.query;
     let filter = {};
+
     if (tag) filter.tags = tag;
+
     const contacts = await Contact.find(filter).populate("tags");
     res.json(contacts);
   } catch (err) {
@@ -15,21 +20,32 @@ router.get("/contacts", async (req, res) => {
   }
 });
 
-// POST create contact
-router.post("/contacts", async (req, res) => {
+// =======================
+// ✅ CREATE CONTACT
+// =======================
+router.post("/contacts", protect, async (req, res) => {
   try {
-    const { name, mobile, tags, source, createdBy } = req.body;
-    if (!mobile) return res.status(400).json({ error: "Mobile number required" });
+    const { name, mobile, tags, source } = req.body;
+
+    if (!mobile) {
+      return res.status(400).json({ error: "Mobile number required" });
+    }
+
     const existing = await Contact.findOne({ mobile });
-    if (existing) return res.status(400).json({ error: "Contact already exists" });
+    if (existing) {
+      return res.status(400).json({ error: "Contact already exists" });
+    }
+
     const contact = new Contact({
       name: name || "UNKNOWN",
       mobile,
       tags: tags || [],
       source: source || "MANUAL",
-      createdBy: createdBy || "test_user",
+      createdBy: req.user.id, // 🔐 from JWT
     });
+
     await contact.save();
+
     const populated = await contact.populate("tags");
     res.status(201).json(populated);
   } catch (err) {
@@ -37,19 +53,32 @@ router.post("/contacts", async (req, res) => {
   }
 });
 
-// PUT update contact
-router.put("/contacts/:id", async (req, res) => {
+// =======================
+// ✅ UPDATE CONTACT
+// =======================
+router.put("/contacts/:id", protect, async (req, res) => {
   try {
     const { name, mobile, tags, source } = req.body;
     const contactId = req.params.id;
 
     const contact = await Contact.findById(contactId);
-    if (!contact) return res.status(404).json({ error: "Contact not found" });
+    if (!contact) {
+      return res.status(404).json({ error: "Contact not found" });
+    }
 
-    // If mobile is changed, check uniqueness
+    // 🔐 Optional: restrict update to owner
+    // if (contact.createdBy.toString() !== req.user.id) {
+    //   return res.status(403).json({ error: "Not authorized" });
+    // }
+
     if (mobile && mobile !== contact.mobile) {
-      const existing = await Contact.findOne({ mobile, _id: { $ne: contactId } });
-      if (existing) return res.status(400).json({ error: "Mobile number already exists" });
+      const existing = await Contact.findOne({
+        mobile,
+        _id: { $ne: contactId },
+      });
+      if (existing) {
+        return res.status(400).json({ error: "Mobile number already exists" });
+      }
       contact.mobile = mobile;
     }
 
@@ -58,6 +87,7 @@ router.put("/contacts/:id", async (req, res) => {
     if (source !== undefined) contact.source = source;
 
     await contact.save();
+
     const populated = await contact.populate("tags");
     res.json(populated);
   } catch (err) {
@@ -65,11 +95,17 @@ router.put("/contacts/:id", async (req, res) => {
   }
 });
 
-// DELETE contact
-router.delete("/contacts/:id", async (req, res) => {
+// =======================
+// ✅ DELETE CONTACT
+// =======================
+router.delete("/contacts/:id", protect, async (req, res) => {
   try {
     const deleted = await Contact.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ error: "Contact not found" });
+
+    if (!deleted) {
+      return res.status(404).json({ error: "Contact not found" });
+    }
+
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

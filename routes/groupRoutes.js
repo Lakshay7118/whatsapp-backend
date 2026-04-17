@@ -1,32 +1,52 @@
 const express = require("express");
 const router = express.Router();
 const Chat = require("../models/chat");
+const protect = require("../middleware/authMiddleware"); // ✅ JWT
 
-// GET /api/groups – list all groups
-router.get("/", async (req, res) => {
+// =======================
+// ✅ GET ALL GROUPS
+// =======================
+router.get("/", protect, async (req, res) => {
   try {
-    // Find all chats that are groups
-    const groups = await Chat.find({ isGroup: true });
+    const userPhone = req.user.phone;
+
+    // 🔐 Only groups where user is participant
+    const groups = await Chat.find({
+      isGroup: true,
+      participants: { $in: [userPhone] },
+    });
+
     res.json(groups);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST /api/groups – create a new group
-router.post("/", async (req, res) => {
+// =======================
+// ✅ CREATE GROUP
+// =======================
+router.post("/", protect, async (req, res) => {
   try {
-    const { groupName, participants, admin } = req.body;
+    const creatorPhone = req.user.phone; // 🔐 from JWT
+    const { groupName, participants } = req.body;
+
     if (!groupName || !participants || !participants.length) {
-      return res.status(400).json({ error: "Missing group name or participants" });
+      return res.status(400).json({
+        error: "Missing group name or participants",
+      });
     }
+
+    // 🔐 Ensure creator is included
+    const uniqueParticipants = [...new Set([...participants, creatorPhone])];
+
     const chat = await Chat.create({
-      participants,
+      participants: uniqueParticipants,
       isGroup: true,
       groupName,
-      admin,
+      admin: creatorPhone, // 🔥 backend decides admin
       status: "active",
     });
+
     res.json(chat);
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -1,7 +1,9 @@
+
 const express = require("express");
 const multer = require("multer");
 const Template = require("../models/Template");
 const cloudinary = require("../config/cloudinary");
+const protect = require("../middleware/authMiddleware"); // ✅ JWT middleware
 
 const router = express.Router();
 
@@ -37,7 +39,7 @@ const uploadToCloudinary = (buffer) => {
 // =======================
 // ✅ CREATE TEMPLATE
 // =======================
-router.post("/templates", upload.single("mediaFile"), async (req, res) => {
+router.post("/templates", protect, upload.single("mediaFile"), async (req, res) => {
   try {
     const {
       name,
@@ -149,7 +151,7 @@ router.post("/templates", upload.single("mediaFile"), async (req, res) => {
 // =======================
 // ✅ GET ALL
 // =======================
-router.get("/templates", async (req, res) => {
+router.get("/templates", protect, async (req, res) => {
   try {
     const templates = await Template.find().sort({ createdAt: -1 });
     res.json({ success: true, templates });
@@ -161,7 +163,7 @@ router.get("/templates", async (req, res) => {
 // =======================
 // ✅ UPDATE TEMPLATE
 // =======================
-router.put("/templates/:id", upload.single("mediaFile"), async (req, res) => {
+router.put("/templates/:id", protect, upload.single("mediaFile"), async (req, res) => {
   try {
     const templateId = req.params.id;
     const existing = await Template.findById(templateId);
@@ -188,7 +190,6 @@ router.put("/templates/:id", upload.single("mediaFile"), async (req, res) => {
     let inputFields = safeParse(req.body.inputFields) || [];
     let variables = safeParse(req.body.variables) || {};
 
-    // transform fields
     if (imageFile && imageFile.type) {
       imageFile.mimeType = imageFile.type;
       delete imageFile.type;
@@ -213,7 +214,6 @@ router.put("/templates/:id", upload.single("mediaFile"), async (req, res) => {
       type: undefined,
     }));
 
-    // 🔥 Upload new media (if exists)
     if (req.file) {
       const result = await uploadToCloudinary(req.file.buffer);
 
@@ -270,7 +270,7 @@ router.put("/templates/:id", upload.single("mediaFile"), async (req, res) => {
 // =======================
 // ✅ GET SINGLE
 // =======================
-router.get("/templates/:id", async (req, res) => {
+router.get("/templates/:id", protect, async (req, res) => {
   try {
     const template = await Template.findById(req.params.id);
     if (!template) return res.status(404).json({ error: "Template not found" });
@@ -283,7 +283,7 @@ router.get("/templates/:id", async (req, res) => {
 // =======================
 // ✅ DELETE
 // =======================
-router.delete("/templates/:id", async (req, res) => {
+router.delete("/templates/:id", protect, async (req, res) => {
   try {
     const deleted = await Template.findByIdAndDelete(req.params.id);
     if (!deleted) return res.status(404).json({ error: "Template not found" });

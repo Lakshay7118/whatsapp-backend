@@ -6,26 +6,40 @@ const Contact = require("../models/Contact");
 const Template = require("../models/Template");
 const resolveTemplate = require("../utils/resolveTemplate");
 const { getIO } = require("../sockets/socket");
+const protect = require("../middleware/authMiddleware"); // ✅ JWT
 
-// GET messages
-router.get("/", async (req, res) => {
-  const { chatId, userPhone } = req.query;
-  if (!chatId) return res.status(400).json({ error: "chatId required" });
+// =======================
+// ✅ GET MESSAGES
+// =======================
+router.get("/", protect, async (req, res) => {
+  try {
+    const { chatId } = req.query;
+    const userPhone = req.user.phone;
 
-  const msgs = await Message.find({
-    chatId,
-    deletedBy: { $ne: userPhone },
-  }).sort({ createdAt: 1 });
+    if (!chatId) {
+      return res.status(400).json({ error: "chatId required" });
+    }
 
-  res.json(msgs);
+    const msgs = await Message.find({
+      chatId,
+      deletedBy: { $ne: userPhone },
+    }).sort({ createdAt: 1 });
+
+    res.json(msgs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// SEND MESSAGE
-router.post("/", async (req, res) => {
+// =======================
+// ✅ SEND MESSAGE
+// =======================
+router.post("/", protect, async (req, res) => {
   try {
+    const sender = req.user.phone; // 🔐 from JWT
+
     const {
       chatId,
-      sender,
       text,
       messageType,
       fileUrl,
@@ -39,33 +53,33 @@ router.post("/", async (req, res) => {
 
     // ── TEMPLATE HANDLING ──────────────────────────────────────────
     if (messageType === "template" && templateMeta) {
-
       resolvedTemplateMeta = {
-        header:        templateMeta.header        || "",
-        body:          templateMeta.body          || "",
-        footer:        templateMeta.footer        || "",
-        mediaType:     templateMeta.mediaType     || "None",
-        mediaUrl:      templateMeta.mediaUrl      || null,
-        templateId:    templateMeta.templateId    || null,
-        variables:     templateMeta.variables     || {},
+        header: templateMeta.header || "",
+        body: templateMeta.body || "",
+        footer: templateMeta.footer || "",
+        mediaType: templateMeta.mediaType || "None",
+        mediaUrl: templateMeta.mediaUrl || null,
+        templateId: templateMeta.templateId || null,
+        variables: templateMeta.variables || {},
         carouselItems: templateMeta.carouselItems || [],
-        resolvedText:  null,
+        resolvedText: null,
 
         actions: {
-          ctaButtons:      templateMeta.actions?.ctaButtons      || [],
-          quickReplies:    templateMeta.actions?.quickReplies     || [],
-          copyCodeButtons: templateMeta.actions?.copyCodeButtons  || [],
-          dropdownButtons: templateMeta.actions?.dropdownButtons  || [],
-          inputFields:     templateMeta.actions?.inputFields      || [],
+          ctaButtons: templateMeta.actions?.ctaButtons || [],
+          quickReplies: templateMeta.actions?.quickReplies || [],
+          copyCodeButtons: templateMeta.actions?.copyCodeButtons || [],
+          dropdownButtons: templateMeta.actions?.dropdownButtons || [],
+          inputFields: templateMeta.actions?.inputFields || [],
         },
       };
 
       try {
-        // Find contact by receiverPhone or by the other participant in the chat
         let contact = null;
+
         if (receiverPhone) {
           contact = await Contact.findOne({ mobile: receiverPhone });
         }
+
         if (!contact) {
           const chat = await Chat.findById(chatId);
           if (chat?.participants) {
@@ -76,76 +90,44 @@ router.post("/", async (req, res) => {
           }
         }
 
-        // CASE 1: templateId provided — fetch template from DB and resolve
         if (templateMeta.templateId) {
           const template = await Template.findById(templateMeta.templateId);
 
           if (template) {
-            // Convert Mongoose Map to plain object
             const vars =
               template.variables instanceof Map
                 ? Object.fromEntries(template.variables)
                 : Object.fromEntries(Object.entries(template.variables || {}));
 
             const resolved = resolveTemplate(template.format, vars, contact);
-            resolvedTemplateMeta.body         = resolved;
+            resolvedTemplateMeta.body = resolved;
             resolvedTemplateMeta.resolvedText = resolved;
-
-            // Also pull actions directly from the stored template
-            // in case the frontend didn't pass them all
-            if (!resolvedTemplateMeta.actions.ctaButtons.length && template.ctaButtons?.length) {
-              resolvedTemplateMeta.actions.ctaButtons = template.ctaButtons.map((btn) => ({
-                id:    btn.id,
-                label: btn.title || btn.label || "",
-                url:   btn.value || btn.url   || "",
-              }));
-            }
-            if (!resolvedTemplateMeta.actions.quickReplies.length && template.quickReplies?.length) {
-              resolvedTemplateMeta.actions.quickReplies = template.quickReplies.map((r) => ({
-                id:    r.id,
-                label: r.title || r.label || "",
-              }));
-            }
-            if (!resolvedTemplateMeta.actions.copyCodeButtons.length && template.copyCodeButtons?.length) {
-              resolvedTemplateMeta.actions.copyCodeButtons = template.copyCodeButtons.map((btn) => ({
-                id:    btn.id,
-                label: btn.title || btn.label || "",
-                value: btn.value || "",
-              }));
-            }
-            if (!resolvedTemplateMeta.actions.dropdownButtons.length && template.dropdownButtons?.length) {
-              resolvedTemplateMeta.actions.dropdownButtons = template.dropdownButtons;
-            }
-            if (!resolvedTemplateMeta.actions.inputFields.length && template.inputFields?.length) {
-              resolvedTemplateMeta.actions.inputFields = template.inputFields;
-            }
-            if (!resolvedTemplateMeta.carouselItems.length && template.carouselItems?.length) {
-              resolvedTemplateMeta.carouselItems = template.carouselItems;
-            }
           }
-        }
-
-        // CASE 2: no templateId — resolve using variables passed directly
-        else if (templateMeta.body && templateMeta.variables) {
+        } else if (templateMeta.body && templateMeta.variables) {
           const resolved = resolveTemplate(
             templateMeta.body,
             templateMeta.variables,
             contact
           );
-          resolvedTemplateMeta.body         = resolved;
+          resolvedTemplateMeta.body = resolved;
           resolvedTemplateMeta.resolvedText = resolved;
         }
-
       } catch (err) {
         console.error("Template resolve error:", err.message);
       }
+    }
+
+    // 🔐 CHECK USER IN CHAT
+    const chat = await Chat.findById(chatId);
+    if (!chat || !chat.participants.includes(sender)) {
+      return res.status(403).json({ error: "Not authorized" });
     }
 
     // ── CREATE MESSAGE ─────────────────────────────────────────────
     const msg = await Message.create({
       chatId,
       sender,
-      text:        text || "",
+      text: text || "",
       messageType: messageType || "text",
       fileUrl,
       fileName,
@@ -157,13 +139,13 @@ router.post("/", async (req, res) => {
 
     // ── UPDATE CHAT LAST MESSAGE ───────────────────────────────────
     let lastMessageText = text;
-    if (messageType === "image")    lastMessageText = "📷 Photo";
-    if (messageType === "file")     lastMessageText = `📎 ${fileName || "File"}`;
+    if (messageType === "image") lastMessageText = "📷 Photo";
+    if (messageType === "file") lastMessageText = `📎 ${fileName || "File"}`;
     if (messageType === "template") lastMessageText = "📋 Template";
 
     await Chat.findByIdAndUpdate(chatId, {
       lastMessage: lastMessageText,
-      updatedAt:   new Date(),
+      updatedAt: new Date(),
     });
 
     // ── SOCKET EMIT ───────────────────────────────────────────────
@@ -175,17 +157,19 @@ router.post("/", async (req, res) => {
     });
 
     res.json(msg);
-
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// MARK READ
-router.post("/mark-read", async (req, res) => {
+// =======================
+// ✅ MARK READ
+// =======================
+router.post("/mark-read", protect, async (req, res) => {
   try {
-    const { chatId, userPhone } = req.body;
+    const { chatId } = req.body;
+    const userPhone = req.user.phone;
 
     await Message.updateMany(
       {
@@ -194,7 +178,7 @@ router.post("/mark-read", async (req, res) => {
         "readBy.user": { $ne: userPhone },
       },
       {
-        $push:  { readBy: { user: userPhone, readAt: new Date() } },
+        $push: { readBy: { user: userPhone, readAt: new Date() } },
         status: "seen",
       }
     );
@@ -207,25 +191,30 @@ router.post("/mark-read", async (req, res) => {
   }
 });
 
-// DELETE MESSAGE
-router.delete("/:messageId", async (req, res) => {
+// =======================
+// ✅ DELETE MESSAGE
+// =======================
+router.delete("/:messageId", protect, async (req, res) => {
   try {
-    const { messageId }        = req.params;
-    const { userPhone, mode }  = req.body;
+    const { messageId } = req.params;
+    const { mode } = req.body;
+    const userPhone = req.user.phone;
 
     const message = await Message.findById(messageId);
-    if (!message) return res.status(404).json({ error: "Message not found" });
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
 
     if (mode === "everyone") {
       if (message.sender !== userPhone) {
         return res.status(403).json({ error: "Not authorized" });
       }
 
-      message.isDeleted    = true;
-      message.text         = "This message was deleted";
-      message.fileUrl      = null;
-      message.fileName     = null;
-      message.fileSize     = null;
+      message.isDeleted = true;
+      message.text = "This message was deleted";
+      message.fileUrl = null;
+      message.fileName = null;
+      message.fileSize = null;
       message.templateMeta = null;
 
       await message.save();
@@ -243,13 +232,12 @@ router.delete("/:messageId", async (req, res) => {
 
       getIO().to(userPhone).emit("messageDeletedForMe", {
         messageId,
-        chatId:    message.chatId,
+        chatId: message.chatId,
         userPhone,
       });
     }
 
     res.json({ message: "Message deleted" });
-
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -3,11 +3,26 @@ const router = express.Router();
 const Chat = require("../models/chat");
 const enrichChat = require("../utils/enrichChat");
 const { getIO } = require("../sockets/socket");
+const protect = require("../middleware/authMiddleware"); // ✅ JWT
 
-// CREATE CHAT BETWEEN 2 USERS
-router.post("/", async (req, res) => {
+// =======================
+// ✅ CREATE CHAT
+// =======================
+router.post("/", protect, async (req, res) => {
   try {
-    const { senderPhone, receiverPhone } = req.body;
+    console.log("REQ USER:", req.user);
+    console.log("REQ BODY:", req.body);
+
+    const senderPhone = req.user?.phone;
+    const { receiverPhone } = req.body;
+
+    if (!senderPhone) {
+      throw new Error("senderPhone missing from JWT");
+    }
+
+    if (!receiverPhone) {
+      return res.status(400).json({ error: "receiverPhone is required" });
+    }
 
     let chat = await Chat.findOne({
       participants: { $all: [senderPhone, receiverPhone] },
@@ -19,26 +34,31 @@ router.post("/", async (req, res) => {
       });
     }
 
-    const enriched = await enrichChat(chat, senderPhone);
-    res.json(enriched);
+    console.log("CHAT CREATED:", chat);
+
+    // 🔥 TEMP: disable enrichChat
+    return res.json(chat);
+
   } catch (err) {
+    console.error("🔥 CREATE CHAT ERROR:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// GET CHATS OF A USER (enriched) – with deletedBy filter
-router.get("/:phone", async (req, res) => {
+// =======================
+// ✅ GET USER CHATS
+// =======================
+router.get("/", protect, async (req, res) => {
   try {
-    const { phone } = req.params;
+    const userPhone = req.user.phone; // 🔐 from JWT
 
-    // ✅ Filter out chats where current user is in deletedBy
     const chats = await Chat.find({
-      participants: { $in: [phone] },
-      deletedBy: { $ne: phone }
+      participants: { $in: [userPhone] },
+      deletedBy: { $ne: userPhone },
     }).sort({ updatedAt: -1 });
 
     const enrichedChats = await Promise.all(
-      chats.map(chat => enrichChat(chat, phone))
+      chats.map((chat) => enrichChat(chat, userPhone))
     );
 
     res.json(enrichedChats);
@@ -47,21 +67,34 @@ router.get("/:phone", async (req, res) => {
   }
 });
 
-// DELETE /api/chats/:chatId (soft delete for current user)
-router.delete("/:chatId", async (req, res) => {
+// =======================
+// ✅ DELETE CHAT (SOFT)
+// =======================
+router.delete("/:chatId", protect, async (req, res) => {
   try {
     const { chatId } = req.params;
-    const { userPhone } = req.body;
+    const userPhone = req.user.phone; // 🔐 from JWT
+
+    const chat = await Chat.findById(chatId);
+
+    if (!chat) {
+      return res.status(404).json({ error: "Chat not found" });
+    }
+
+    // 🔐 Ensure user is part of chat
+    if (!chat.participants.some(p => String(p) === String(userPhone))) {
+      return res.status(403).json({ error: "Not authorized" });
+    }
 
     const updated = await Chat.findByIdAndUpdate(
       chatId,
       { $addToSet: { deletedBy: userPhone } },
       { new: true }
     );
-    if (!updated) return res.status(404).json({ error: "Chat not found" });
 
     const io = getIO();
     io.to(userPhone).emit("chatDeleted", { chatId, userPhone });
+
     res.json({ message: "Chat deleted for you" });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -1,6 +1,8 @@
 const express = require("express");
 const Campaign = require("../models/Campaign");
 const Contact = require("../models/Contact");
+const protect = require("../middleware/authMiddleware"); // ✅ JWT middleware
+
 const router = express.Router();
 
 // Helper to compute next run date
@@ -13,7 +15,6 @@ function computeNextRun(recurrence, baseDate = new Date()) {
     case "weekly":
       next.setDate(next.getDate() + (7 * recurrence.interval));
       if (recurrence.dayOfWeek !== undefined) {
-        // adjust to specific day (simplified – you may want a full library)
         const currentDay = next.getDay();
         const diff = (recurrence.dayOfWeek - currentDay + 7) % 7;
         next.setDate(next.getDate() + diff);
@@ -28,15 +29,16 @@ function computeNextRun(recurrence, baseDate = new Date()) {
     case "hourly":
       next.setHours(next.getHours() + recurrence.interval);
       break;
-    default: // one‑time
+    default:
       return null;
   }
   return next;
 }
 
-// POST /api/campaigns
-// POST /api/campaigns
-router.post("/campaigns", async (req, res) => {
+// =======================
+// ✅ CREATE CAMPAIGN
+// =======================
+router.post("/campaigns", protect, async (req, res) => {
   try {
     const {
       campaignName,
@@ -51,7 +53,6 @@ router.post("/campaigns", async (req, res) => {
       recurrence,
       variableValues: requestVariableValues,
       messagePreview,
-      createdBy,
     } = req.body;
 
     if (!campaignName) {
@@ -92,26 +93,22 @@ router.post("/campaigns", async (req, res) => {
       nextRun = computeNextRun(recurrenceObj, new Date());
     }
 
-    // ─── ✅ FIX: Merge template default variable values ─────────────────────────
+    // 🔥 Merge template variables
     let finalVariableValues = requestVariableValues || {};
 
     if (templateId) {
       const Template = require("../models/Template");
       const template = await Template.findById(templateId).lean();
-      
+
       if (template && template.variables) {
-        // For each variable defined in the template
         for (const [key, varDef] of Object.entries(template.variables)) {
-          // If the request didn't provide this variable, use template's default
           if (!finalVariableValues[key]) {
             finalVariableValues[key] = {
               type: varDef.type,
               value: varDef.value || "",
             };
           } else {
-            // Ensure type is preserved (request may only have value)
             finalVariableValues[key].type = varDef.type;
-            // If value is empty, fall back to template default
             if (!finalVariableValues[key].value) {
               finalVariableValues[key].value = varDef.value || "";
             }
@@ -131,9 +128,9 @@ router.post("/campaigns", async (req, res) => {
       templateId,
       scheduledDateTime: nextRun,
       recurrence: recurrenceObj,
-      variableValues: finalVariableValues,   // 👈 Use merged values
+      variableValues: finalVariableValues,
       messagePreview,
-      createdBy,
+      createdBy: req.user.id, // 🔥 from JWT
       status: "scheduled",
       nextRun,
     });
@@ -150,48 +147,24 @@ router.post("/campaigns", async (req, res) => {
   }
 });
 
-// GET /api/campaigns
-router.get("/campaigns", async (req, res) => {
+// =======================
+// ✅ GET ALL CAMPAIGNS
+// =======================
+router.get("/campaigns", protect, async (req, res) => {
   try {
-    const campaigns = await Campaign.find().sort({ scheduledDateTime: -1 });
+    const campaigns = await Campaign.find()
+      .sort({ scheduledDateTime: -1 });
+
     res.json({ success: true, campaigns });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Helper: compute next run (same as in scheduler)
-function computeNextRun(recurrence, baseDate = new Date()) {
-  const next = new Date(baseDate);
-  switch (recurrence.type) {
-    case "daily":
-      next.setDate(next.getDate() + recurrence.interval);
-      break;
-    case "weekly":
-      next.setDate(next.getDate() + 7 * recurrence.interval);
-      if (recurrence.dayOfWeek !== undefined) {
-        const currentDay = next.getDay();
-        const diff = (recurrence.dayOfWeek - currentDay + 7) % 7;
-        next.setDate(next.getDate() + diff);
-      }
-      break;
-    case "monthly":
-      next.setMonth(next.getMonth() + recurrence.interval);
-      if (recurrence.dayOfMonth) {
-        next.setDate(recurrence.dayOfMonth);
-      }
-      break;
-    case "hourly":
-      next.setHours(next.getHours() + recurrence.interval);
-      break;
-    default:
-      return null;
-  }
-  return next;
-}
-
-// DELETE campaign
-router.delete("/campaigns/:id", async (req, res) => {
+// =======================
+// ✅ DELETE CAMPAIGN
+// =======================
+router.delete("/campaigns/:id", protect, async (req, res) => {
   try {
     const deleted = await Campaign.findByIdAndDelete(req.params.id);
     if (!deleted) return res.status(404).json({ error: "Campaign not found" });
@@ -202,11 +175,14 @@ router.delete("/campaigns/:id", async (req, res) => {
   }
 });
 
-// PATCH /api/campaigns/:id/status – pause/resume
-router.patch("/campaigns/:id/status", async (req, res) => {
+// =======================
+// ✅ UPDATE STATUS
+// =======================
+router.patch("/campaigns/:id/status", protect, async (req, res) => {
   try {
     const { status } = req.body;
     const validStatuses = ["active", "paused", "scheduled", "sent"];
+
     if (!status || !validStatuses.includes(status)) {
       return res.status(400).json({ error: "Invalid status" });
     }
@@ -218,10 +194,8 @@ router.patch("/campaigns/:id/status", async (req, res) => {
 
     campaign.status = status;
 
-    // If resuming from paused → scheduled, recalc nextRun if needed
     if (status === "scheduled" || status === "active") {
       if (!campaign.nextRun || new Date(campaign.nextRun) < new Date()) {
-        // Only recalc for recurring campaigns
         if (campaign.recurrence && campaign.recurrence.type !== "one-time") {
           campaign.nextRun = computeNextRun(campaign.recurrence, new Date());
         }
@@ -229,6 +203,7 @@ router.patch("/campaigns/:id/status", async (req, res) => {
     }
 
     await campaign.save();
+
     res.json({ success: true, campaign });
   } catch (error) {
     console.error("Update campaign status error:", error);
@@ -237,3 +212,4 @@ router.patch("/campaigns/:id/status", async (req, res) => {
 });
 
 module.exports = router;
+
