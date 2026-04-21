@@ -22,7 +22,6 @@ function resolveTemplateText(templateText, variableValues, contact) {
   Object.entries(variableValues).forEach(([key, mapping]) => {
     let value = "";
 
-    // Determine value
     if (mapping.type === "name") {
       value = contact.name || "Customer";
     } else if (mapping.type === "phone") {
@@ -31,13 +30,11 @@ function resolveTemplateText(templateText, variableValues, contact) {
       value = mapping.value || "";
     }
 
-    // Fallback
     if (!value || value.trim() === "") {
       console.warn(`⚠️ Empty value for {{${key}}}, using "N/A"`);
       value = "N/A";
     }
 
-    // ✅ ESCAPED CURLY BRACES FOR REGEX
     const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(`\\{\\{${escapedKey}\\}\\}`, "g");
 
@@ -52,8 +49,19 @@ function resolveTemplateText(templateText, variableValues, contact) {
 
 // 🔥 SEND MESSAGE FUNCTION
 async function sendMessageToContact(contact, campaign, io) {
-  const creatorPhone = campaign.createdBy;
+  // ✅ FIX 1: createdBy is now populated — use .phone not the ObjectId
+  const creatorPhone = campaign.createdBy?.phone;
   const targetPhone = contact.mobile;
+
+  if (!creatorPhone) {
+    console.error("❌ creatorPhone is missing — createdBy not populated correctly");
+    return;
+  }
+
+  if (!targetPhone) {
+    console.error("❌ targetPhone is missing for contact:", contact);
+    return;
+  }
 
   // find/create chat
   let chat = await Chat.findOne({
@@ -64,12 +72,13 @@ async function sendMessageToContact(contact, campaign, io) {
     chat = await Chat.create({
       participants: [creatorPhone, targetPhone],
     });
+    console.log("✅ New chat created:", chat._id);
   }
 
   // get template with all fields
   const template = await Template.findById(campaign.templateId).lean();
   if (!template) {
-    console.error("❌ Template not found");
+    console.error("❌ Template not found for campaignId:", campaign._id);
     return;
   }
 
@@ -77,26 +86,26 @@ async function sendMessageToContact(contact, campaign, io) {
   console.log("👤 CONTACT:", contact.name, contact.mobile);
   console.log("🧾 TEMPLATE:", template.name);
 
-  // Resolve body text (format) with variables
+  // Resolve body text with variables
   const resolvedBody = resolveTemplateText(
     template.format || "",
     campaign.variableValues,
     contact
   );
 
-  // Resolve header (using template.name as the header text, just like frontend does)
+  // Resolve header
   const resolvedHeader = resolveTemplateText(
     template.name || "",
     campaign.variableValues,
     contact
   );
 
-  // Resolve footer (if it exists)
+  // Resolve footer
   const resolvedFooter = template.footer
     ? resolveTemplateText(template.footer, campaign.variableValues, contact)
     : "";
 
-  // Extract media URL based on mediaType
+  // Extract media URL
   let mediaUrl = null;
   if (template.mediaType === "Image" && template.imageFile?.url) {
     mediaUrl = template.imageFile.url;
@@ -104,10 +113,10 @@ async function sendMessageToContact(contact, campaign, io) {
     mediaUrl = template.videoFile.url;
   }
 
-  // Build templateMeta exactly as frontend expects (matching sendTemplate in LiveChatPage)
+  // Build templateMeta matching what frontend expects
   const templateMeta = {
     templateId: template._id,
-    header: resolvedHeader,                 // ✅ Now using template.name
+    header: resolvedHeader,
     body: resolvedBody,
     footer: resolvedFooter,
     resolvedText: resolvedBody,
@@ -124,20 +133,31 @@ async function sendMessageToContact(contact, campaign, io) {
     carouselItems: template.carouselItems || [],
   };
 
-  // create message WITH templateMeta
+  // Create message in DB
   const msg = await Message.create({
-    chatId: chat._id,
+    chatId: chat._id,       // ✅ must be set for live chat to match
     sender: creatorPhone,
-    text: resolvedBody,                // fallback plain text
+    text: resolvedBody,
     messageType: "template",
     status: "sent",
     sentAt: new Date(),
-    templateMeta,                      // <-- now fully populated
+    templateMeta,
   });
 
-  // socket emit
-  io.to(targetPhone).emit("newMessage", msg);
-  io.to(creatorPhone).emit("newMessage", msg);
+  console.log("✅ Message created:", msg._id, "for chat:", chat._id);
+
+  // ✅ FIX 2: emit to chatId room (NOT phone rooms)
+  // Live chat joins rooms via: s.emit("joinChat", chatId)
+  // handleNewMessage filters by: if (String(msg.chatId) !== String(chatId)) return
+  // So we MUST emit to chatId room with chatId on the payload
+  const msgPayload = {
+    ...msg.toObject(),
+    chatId: chat._id,  // ✅ ensures handleNewMessage filter passes
+  };
+
+  io.to(String(chat._id)).emit("newMessage", msgPayload);
+
+  console.log("📡 Emitted to room:", String(chat._id));
 
   return msg;
 }
@@ -146,17 +166,19 @@ async function sendMessageToContact(contact, campaign, io) {
 async function processCampaigns() {
   const now = new Date();
 
+  // ✅ FIX 3: populate createdBy to get phone + only approved campaigns
   const campaigns = await Campaign.find({
     status: "scheduled",
+    approvalStatus: "approved",
     scheduledDateTime: { $lte: now },
-  });
+  }).populate("createdBy", "phone name"); // ✅ get phone from User model
 
   if (campaigns.length === 0) return;
 
-  console.log(`🚀 Found ${campaigns.length} campaigns`);
+  console.log(`🚀 Found ${campaigns.length} campaigns to process`);
 
   for (const campaign of campaigns) {
-    console.log("📤 Running campaign:", campaign._id);
+    console.log("📤 Running campaign:", campaign._id, "| Creator:", campaign.createdBy?.phone);
 
     let recipients = [];
 
@@ -174,7 +196,7 @@ async function processCampaigns() {
       });
     }
 
-    // ❌ GROUP (skip)
+    // ⚠️ GROUP (not implemented)
     else if (campaign.audienceType === "group") {
       console.log("⚠️ Group sending not implemented yet");
       continue;
@@ -188,7 +210,14 @@ async function processCampaigns() {
       }));
     }
 
-    console.log(`👥 Found ${recipients.length} contacts`);
+    console.log(`👥 Found ${recipients.length} recipients`);
+
+    if (recipients.length === 0) {
+      console.warn("⚠️ No recipients found for campaign:", campaign._id);
+      campaign.status = "sent";
+      await campaign.save();
+      continue;
+    }
 
     const io = getIO();
 
@@ -197,19 +226,19 @@ async function processCampaigns() {
         await sendMessageToContact(contact, campaign, io);
         campaign.sentCount += 1;
       } catch (err) {
-        console.error("❌ Send failed:", err.message);
+        console.error("❌ Send failed for contact:", contact.mobile, "| Error:", err.message);
       }
     }
 
-    // ✅ mark campaign completed
+    // ✅ mark campaign as sent
     campaign.status = "sent";
     await campaign.save();
 
-    console.log("✅ Campaign completed");
+    console.log(`✅ Campaign ${campaign._id} completed — sent to ${campaign.sentCount} contacts`);
   }
 }
 
-// ⏱ run every 10 sec
+// ⏱ run every 10 seconds
 cron.schedule("*/10 * * * * *", () => {
   processCampaigns().catch(console.error);
 });

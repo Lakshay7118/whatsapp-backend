@@ -1,15 +1,18 @@
 const express = require("express");
 const router = express.Router();
+
 const Message = require("../models/Message");
 const Chat = require("../models/chat");
 const Contact = require("../models/Contact");
 const Template = require("../models/Template");
+
 const resolveTemplate = require("../utils/resolveTemplate");
 const { getIO } = require("../sockets/socket");
-const protect = require("../middleware/authMiddleware"); // ✅ JWT
 
+const protect = require("../middleware/authMiddleware");
+const allowRoles = require("../middleware/roleMiddleware"); // 🔥 ADD
 // =======================
-// ✅ GET MESSAGES
+// ✅ GET MESSAGES (SECURE)
 // =======================
 router.get("/", protect, async (req, res) => {
   try {
@@ -20,23 +23,33 @@ router.get("/", protect, async (req, res) => {
       return res.status(400).json({ error: "chatId required" });
     }
 
+    // 🔐 CHECK ACCESS TO CHAT
+    const chat = await Chat.findById(chatId);
+
+    if (!chat || !chat.participants.includes(userPhone)) {
+      return res.status(403).json({ error: "Not authorized" });
+    }
+
     const msgs = await Message.find({
       chatId,
       deletedBy: { $ne: userPhone },
     }).sort({ createdAt: 1 });
 
     res.json(msgs);
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+
 // =======================
-// ✅ SEND MESSAGE
+// ✅ SEND MESSAGE (ALL ROLES)
 // =======================
 router.post("/", protect, async (req, res) => {
   try {
-    const sender = req.user.phone; // 🔐 from JWT
+    const sender = req.user.phone;
+    const userRole = req.user.role;
 
     const {
       chatId,
@@ -51,7 +64,7 @@ router.post("/", protect, async (req, res) => {
 
     let resolvedTemplateMeta = null;
 
-    // ── TEMPLATE HANDLING ──────────────────────────────────────────
+    // ================= TEMPLATE =================
     if (messageType === "template" && templateMeta) {
       resolvedTemplateMeta = {
         header: templateMeta.header || "",
@@ -63,7 +76,6 @@ router.post("/", protect, async (req, res) => {
         variables: templateMeta.variables || {},
         carouselItems: templateMeta.carouselItems || [],
         resolvedText: null,
-
         actions: {
           ctaButtons: templateMeta.actions?.ctaButtons || [],
           quickReplies: templateMeta.actions?.quickReplies || [],
@@ -82,11 +94,9 @@ router.post("/", protect, async (req, res) => {
 
         if (!contact) {
           const chat = await Chat.findById(chatId);
-          if (chat?.participants) {
-            const otherPhone = chat.participants.find((p) => p !== sender);
-            if (otherPhone) {
-              contact = await Contact.findOne({ mobile: otherPhone });
-            }
+          const otherPhone = chat?.participants.find(p => p !== sender);
+          if (otherPhone) {
+            contact = await Contact.findOne({ mobile: otherPhone });
           }
         }
 
@@ -94,36 +104,31 @@ router.post("/", protect, async (req, res) => {
           const template = await Template.findById(templateMeta.templateId);
 
           if (template) {
-            const vars =
-              template.variables instanceof Map
-                ? Object.fromEntries(template.variables)
-                : Object.fromEntries(Object.entries(template.variables || {}));
+            const vars = Object.fromEntries(
+              Object.entries(template.variables || {})
+            );
 
             const resolved = resolveTemplate(template.format, vars, contact);
             resolvedTemplateMeta.body = resolved;
             resolvedTemplateMeta.resolvedText = resolved;
           }
-        } else if (templateMeta.body && templateMeta.variables) {
-          const resolved = resolveTemplate(
-            templateMeta.body,
-            templateMeta.variables,
-            contact
-          );
-          resolvedTemplateMeta.body = resolved;
-          resolvedTemplateMeta.resolvedText = resolved;
         }
+
       } catch (err) {
         console.error("Template resolve error:", err.message);
       }
     }
 
-    // 🔐 CHECK USER IN CHAT
+    // 🔐 CHAT ACCESS CHECK
     const chat = await Chat.findById(chatId);
-    if (!chat || !chat.participants.includes(sender)) {
+
+    const isAdmin = ["super_admin", "manager"].includes(userRole);
+
+    if (!chat || (!chat.participants.includes(sender) && !isAdmin)) {
       return res.status(403).json({ error: "Not authorized" });
     }
 
-    // ── CREATE MESSAGE ─────────────────────────────────────────────
+    // ================= CREATE MESSAGE =================
     const msg = await Message.create({
       chatId,
       sender,
@@ -137,7 +142,7 @@ router.post("/", protect, async (req, res) => {
       readBy: [],
     });
 
-    // ── UPDATE CHAT LAST MESSAGE ───────────────────────────────────
+    // ================= UPDATE CHAT =================
     let lastMessageText = text;
     if (messageType === "image") lastMessageText = "📷 Photo";
     if (messageType === "file") lastMessageText = `📎 ${fileName || "File"}`;
@@ -148,7 +153,7 @@ router.post("/", protect, async (req, res) => {
       updatedAt: new Date(),
     });
 
-    // ── SOCKET EMIT ───────────────────────────────────────────────
+    // ================= SOCKET =================
     const io = getIO();
     io.to(chatId).emit("newMessage", msg);
     io.to(sender).emit("messageDelivered", {
@@ -157,11 +162,13 @@ router.post("/", protect, async (req, res) => {
     });
 
     res.json(msg);
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // =======================
 // ✅ MARK READ
@@ -186,10 +193,12 @@ router.post("/mark-read", protect, async (req, res) => {
     getIO().to(chatId).emit("messagesSeen", { chatId, user: userPhone });
 
     res.json({ success: true });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // =======================
 // ✅ DELETE MESSAGE
@@ -198,15 +207,21 @@ router.delete("/:messageId", protect, async (req, res) => {
   try {
     const { messageId } = req.params;
     const { mode } = req.body;
+
     const userPhone = req.user.phone;
+    const userRole = req.user.role;
 
     const message = await Message.findById(messageId);
+
     if (!message) {
       return res.status(404).json({ error: "Message not found" });
     }
 
+    const isAdmin = userRole === "super_admin";
+
+    // 🔥 DELETE FOR EVERYONE
     if (mode === "everyone") {
-      if (message.sender !== userPhone) {
+      if (message.sender !== userPhone && !isAdmin) {
         return res.status(403).json({ error: "Not authorized" });
       }
 
@@ -219,12 +234,18 @@ router.delete("/:messageId", protect, async (req, res) => {
 
       await message.save();
 
-      getIO().to(message.chatId.toString()).emit("messageDeletedForEveryone", {
-        messageId,
-        chatId: message.chatId,
-      });
+      getIO().to(message.chatId.toString()).emit(
+        "messageDeletedForEveryone",
+        {
+          messageId,
+          chatId: message.chatId,
+        }
+      );
 
-    } else if (mode === "me") {
+    }
+
+    // 🔥 DELETE FOR ME
+    else if (mode === "me") {
       if (!message.deletedBy.includes(userPhone)) {
         message.deletedBy.push(userPhone);
         await message.save();
@@ -238,9 +259,11 @@ router.delete("/:messageId", protect, async (req, res) => {
     }
 
     res.json({ message: "Message deleted" });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 module.exports = router;

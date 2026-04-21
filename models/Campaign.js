@@ -10,7 +10,6 @@ const CampaignSchema = new mongoose.Schema(
       default: "Pre-approved template message",
     },
 
-    // ✅ FIXED ENUM
     audienceType: {
       type: String,
       enum: ["tags", "contact", "group", "manual"],
@@ -18,7 +17,6 @@ const CampaignSchema = new mongoose.Schema(
       default: "tags",
     },
 
-    // ✅ ALL TARGET TYPES
     tagIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Tag" }],
     contactIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Contact" }],
     groupIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Group" }],
@@ -44,7 +42,6 @@ const CampaignSchema = new mongoose.Schema(
       hour: { type: Number, min: 0, max: 23 },
     },
 
-    // ✅ FIX NAME
     variableValues: { type: Object, default: {} },
 
     messagePreview: { type: String, default: "" },
@@ -52,23 +49,34 @@ const CampaignSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
-  "draft",
-  "scheduled",
-  "active",
-  "paused",
-  "processing",
-  "sent",
-  "completed", // ✅ ADD THIS
-  "failed",
-  "cancelled",
-],
+        "draft",
+        "scheduled",
+        "active",
+        "paused",
+        "processing",
+        "sent",
+        "completed",
+        "failed",
+        "cancelled",
+      ],
       default: "scheduled",
     },
 
+    // ✅ NEW: Internal approval status for manager submissions
+    approvalStatus: {
+      type: String,
+      enum: ["pending_approval", "approved", "rejected"],
+      default: "approved", // admin-created campaigns auto-approved
+    },
+
+    // ✅ FIXED: ObjectId ref to User
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+
     nextRun: { type: Date },
-
-    createdBy: { type: String, required: true },
-
     sentCount: { type: Number, default: 0 },
     errorLog: { type: String, default: "" },
   },

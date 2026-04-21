@@ -13,13 +13,12 @@ const TemplateSchema = new mongoose.Schema(
     language: { type: String, default: "English" },
 
     type: {
-      type: String,
+      type: String, 
       enum: ["Text", "Media", "Interactive"],
       default: "Text",
     },
 
     format: { type: String, required: true },
-
     footer: { type: String, default: "" },
 
     actionType: {
@@ -28,7 +27,6 @@ const TemplateSchema = new mongoose.Schema(
       default: "none",
     },
 
-    // ✅ MEDIA
     mediaType: {
       type: String,
       enum: ["None", "Image", "Video", "Carousel"],
@@ -49,7 +47,6 @@ const TemplateSchema = new mongoose.Schema(
       _id: false,
     },
 
-    // ✅ CAROUSEL
     carouselItems: [
       {
         id: { type: String },
@@ -62,7 +59,6 @@ const TemplateSchema = new mongoose.Schema(
       },
     ],
 
-    // ✅ CTA BUTTONS
     ctaButtons: [
       {
         id: { type: String },
@@ -73,7 +69,6 @@ const TemplateSchema = new mongoose.Schema(
       },
     ],
 
-    // ✅ QUICK REPLIES
     quickReplies: [
       {
         id: { type: String },
@@ -82,7 +77,6 @@ const TemplateSchema = new mongoose.Schema(
       },
     ],
 
-    // ✅ COPY CODE
     copyCodeButtons: [
       {
         id: { type: String },
@@ -91,7 +85,6 @@ const TemplateSchema = new mongoose.Schema(
       },
     ],
 
-    // ✅ DROPDOWN
     dropdownButtons: [
       {
         id: { type: String },
@@ -104,7 +97,6 @@ const TemplateSchema = new mongoose.Schema(
       },
     ],
 
-    // ✅ INPUT FIELDS
     inputFields: [
       {
         id: { type: String },
@@ -115,16 +107,11 @@ const TemplateSchema = new mongoose.Schema(
       },
     ],
 
-    // ✅ VARIABLES - stores how each {{1}}, {{2}} etc. should be resolved
     variables: {
       type: Map,
       of: new mongoose.Schema(
         {
-          type: {
-            type: String,
-            enum: ["name", "number", "manual"],
-            default: "manual",
-          },
+          type: { type: String, enum: ["name", "number", "manual"], default: "manual" },
           value: { type: String, default: "" },
         },
         { _id: false }
@@ -132,18 +119,28 @@ const TemplateSchema = new mongoose.Schema(
       default: {},
     },
 
-    // ✅ STATUS
+    // ✅ WhatsApp status (DRAFT, PENDING, APPROVED, REJECTED)
     status: {
       type: String,
       enum: ["DRAFT", "PENDING", "APPROVED", "REJECTED"],
       default: "DRAFT",
     },
 
-    createdBy: { type: String, required: true },
+    // ✅ NEW — Internal approval status for manager submissions
+    approvalStatus: {
+      type: String,
+      enum: ["pending_approval", "approved", "rejected"],
+      default: "approved", // admin templates auto-approved
+    },
+
+    // ✅ FIXED — ObjectId ref so we can populate name/role
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 module.exports = mongoose.model("Template", TemplateSchema);
