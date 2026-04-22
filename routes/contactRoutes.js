@@ -245,7 +245,7 @@ router.delete(
       const deleted = await Contact.findByIdAndDelete(req.params.id);
       if (!deleted) return res.status(404).json({ error: "Contact not found" });
       res.json({ success: true });
-    } catch (err) {
+    } catch (err) { 
       res.status(500).json({ error: err.message });
     }
   }

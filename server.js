@@ -18,6 +18,9 @@ const groupRoutes = require("./routes/groupRoutes");
 const templateRoutes = require("./routes/templateRoutes");
 const campaignRoutes = require("./routes/campaignRoutes");
 const tagRoutes = require("./routes/tagRoutes");
+const taskRoutes = require("./routes/taskRoutes");
+require("./jobs/taskReminder");
+
 
 const app = express();
 const server = http.createServer(app);
@@ -49,6 +52,7 @@ app.use("/api", templateRoutes);
 app.use("/api", campaignRoutes);
 app.use("/api", tagRoutes);
 app.use("/api/groups", groupRoutes);
+app.use("/api/tasks", taskRoutes);
 
 // Test route
 app.get("/", (req, res) => {

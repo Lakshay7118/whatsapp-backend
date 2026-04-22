@@ -49,71 +49,41 @@ function resolveTemplateText(templateText, variableValues, contact) {
 
 // 🔥 SEND MESSAGE FUNCTION
 async function sendMessageToContact(contact, campaign, io) {
-  // ✅ FIX 1: createdBy is now populated — use .phone not the ObjectId
   const creatorPhone = campaign.createdBy?.phone;
   const targetPhone = contact.mobile;
 
-  if (!creatorPhone) {
-    console.error("❌ creatorPhone is missing — createdBy not populated correctly");
+  if (!creatorPhone || !targetPhone) {
+    console.error("❌ Missing phone:", { creatorPhone, targetPhone });
     return;
   }
 
-  if (!targetPhone) {
-    console.error("❌ targetPhone is missing for contact:", contact);
-    return;
-  }
-
-  // find/create chat
   let chat = await Chat.findOne({
     participants: { $all: [creatorPhone, targetPhone] },
   });
 
+  const isNewChat = !chat;
+
   if (!chat) {
-    chat = await Chat.create({
-      participants: [creatorPhone, targetPhone],
-    });
+    chat = await Chat.create({ participants: [creatorPhone, targetPhone] });
     console.log("✅ New chat created:", chat._id);
   }
 
-  // get template with all fields
   const template = await Template.findById(campaign.templateId).lean();
   if (!template) {
-    console.error("❌ Template not found for campaignId:", campaign._id);
+    console.error("❌ Template not found:", campaign._id);
     return;
   }
 
-  console.log("📦 CAMPAIGN VARIABLE VALUES:", campaign.variableValues);
-  console.log("👤 CONTACT:", contact.name, contact.mobile);
-  console.log("🧾 TEMPLATE:", template.name);
-
-  // Resolve body text with variables
-  const resolvedBody = resolveTemplateText(
-    template.format || "",
-    campaign.variableValues,
-    contact
-  );
-
-  // Resolve header
-  const resolvedHeader = resolveTemplateText(
-    template.name || "",
-    campaign.variableValues,
-    contact
-  );
-
-  // Resolve footer
+  const resolvedBody = resolveTemplateText(template.format || "", campaign.variableValues, contact);
+  const resolvedHeader = resolveTemplateText(template.name || "", campaign.variableValues, contact);
   const resolvedFooter = template.footer
     ? resolveTemplateText(template.footer, campaign.variableValues, contact)
     : "";
 
-  // Extract media URL
   let mediaUrl = null;
-  if (template.mediaType === "Image" && template.imageFile?.url) {
-    mediaUrl = template.imageFile.url;
-  } else if (template.mediaType === "Video" && template.videoFile?.url) {
-    mediaUrl = template.videoFile.url;
-  }
+  if (template.mediaType === "Image" && template.imageFile?.url) mediaUrl = template.imageFile.url;
+  else if (template.mediaType === "Video" && template.videoFile?.url) mediaUrl = template.videoFile.url;
 
-  // Build templateMeta matching what frontend expects
   const templateMeta = {
     templateId: template._id,
     header: resolvedHeader,
@@ -121,7 +91,7 @@ async function sendMessageToContact(contact, campaign, io) {
     footer: resolvedFooter,
     resolvedText: resolvedBody,
     mediaType: template.mediaType || "None",
-    mediaUrl: mediaUrl,
+    mediaUrl,
     variables: campaign.variableValues || {},
     actions: {
       ctaButtons: template.ctaButtons || [],
@@ -133,9 +103,8 @@ async function sendMessageToContact(contact, campaign, io) {
     carouselItems: template.carouselItems || [],
   };
 
-  // Create message in DB
   const msg = await Message.create({
-    chatId: chat._id,       // ✅ must be set for live chat to match
+    chatId: chat._id,
     sender: creatorPhone,
     text: resolvedBody,
     messageType: "template",
@@ -144,20 +113,26 @@ async function sendMessageToContact(contact, campaign, io) {
     templateMeta,
   });
 
-  console.log("✅ Message created:", msg._id, "for chat:", chat._id);
+  // ✅ FIX 2: Update chat's lastMessage so it sorts to top in chat list
+  await Chat.findByIdAndUpdate(chat._id, {
+    lastMessage: "📋 Template",
+    updatedAt: new Date(),
+  });
 
-  // ✅ FIX 2: emit to chatId room (NOT phone rooms)
-  // Live chat joins rooms via: s.emit("joinChat", chatId)
-  // handleNewMessage filters by: if (String(msg.chatId) !== String(chatId)) return
-  // So we MUST emit to chatId room with chatId on the payload
-  const msgPayload = {
-    ...msg.toObject(),
-    chatId: chat._id,  // ✅ ensures handleNewMessage filter passes
-  };
+  const msgPayload = { ...msg.toObject(), chatId: chat._id };
 
+  // ✅ FIX 1a: Emit to chatId room (for anyone already viewing this chat)
   io.to(String(chat._id)).emit("newMessage", msgPayload);
 
-  console.log("📡 Emitted to room:", String(chat._id));
+  // ✅ FIX 1b: Emit to creator's personal room so their chat list refreshes
+  io.to(creatorPhone).emit("chatUpdated", {
+    chatId: chat._id,
+    isNewChat,
+    lastMessage: "📋 Template",
+    participants: [creatorPhone, targetPhone],
+  });
+
+  console.log("📡 Emitted to room:", String(chat._id), "| Notified:", creatorPhone);
 
   return msg;
 }

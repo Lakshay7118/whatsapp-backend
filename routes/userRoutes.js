@@ -66,6 +66,17 @@ router.post("/login", async (req, res) => {
   }
 });
 
+// =======================
+// ✅ GET ALL USERS (for assignment dropdown)
+// =======================
+router.get("/", protect, allowRoles("super_admin", "manager"), async (req, res) => {
+  try {
+    const users = await User.find().select("name phone role").lean();
+    res.json({ success: true, data: users });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 // Add this in your userRoutes.js
 
 // =======================

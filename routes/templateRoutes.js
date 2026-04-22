@@ -101,19 +101,26 @@ router.put(
 
 // =======================
 // ✅ GET ALL TEMPLATES
+// super_admin → all templates
+// manager     → only their own templates
+// user        → only approved templates (for live chat)
 // =======================
 router.get(
   "/templates",
   protect,
-  allowRoles("super_admin", "manager"),
+  allowRoles("super_admin", "manager", "user"), // ✅ added "user"
   async (req, res) => {
     try {
       let filter = {};
 
-      // ✅ Manager sees only their own templates
       if (req.user.role === "manager") {
+        // Manager sees only their own templates
         filter.createdBy = req.user.id;
+      } else if (req.user.role === "user") {
+        // User/agent sees only approved templates (for live chat use)
+        filter.approvalStatus = "approved";
       }
+      // super_admin: no filter → sees everything
 
       const templates = await Template.find(filter)
         .populate("createdBy", "name phone role")
@@ -186,7 +193,7 @@ router.post(
         variables,
         status: "DRAFT",
         approvalStatus,
-        createdBy: req.user.id, // ✅ from token
+        createdBy: req.user.id,
       });
 
       await template.save();
@@ -213,7 +220,7 @@ router.post(
 router.get(
   "/templates/:id",
   protect,
-  allowRoles("super_admin", "manager"),
+  allowRoles("super_admin", "manager", "user"), // ✅ added "user"
   async (req, res) => {
     try {
       const template = await Template.findById(req.params.id)
@@ -221,8 +228,13 @@ router.get(
 
       if (!template) return res.status(404).json({ error: "Template not found" });
 
-      // ✅ Manager can only view their own template
+      // Manager can only view their own templates
       if (req.user.role === "manager" && template.createdBy._id.toString() !== req.user.id) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      // User/agent can only view approved templates
+      if (req.user.role === "user" && template.approvalStatus !== "approved") {
         return res.status(403).json({ error: "Not authorized" });
       }
 
@@ -249,7 +261,7 @@ router.put(
 
       if (!existing) return res.status(404).json({ error: "Template not found" });
 
-      // ✅ Manager can only edit their own templates
+      // Manager can only edit their own templates
       if (req.user.role === "manager" && existing.createdBy.toString() !== req.user.id) {
         return res.status(403).json({ error: "Not authorized" });
       }
@@ -280,7 +292,7 @@ router.put(
         if (mediaType === "Video") videoFile = existing.videoFile;
       }
 
-      // ✅ Manager edits go back to pending approval
+      // Manager edits go back to pending approval
       const approvalStatus = req.user.role === "manager" ? "pending_approval" : existing.approvalStatus;
 
       const updated = await Template.findByIdAndUpdate(
@@ -302,7 +314,7 @@ router.put(
           dropdownButtons,
           inputFields,
           variables,
-          approvalStatus, // ✅ manager edits reset to pending
+          approvalStatus,
           updatedAt: Date.now(),
         },
         { new: true }
