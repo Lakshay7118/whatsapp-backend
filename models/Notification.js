@@ -9,7 +9,9 @@ const NotificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["task_assigned", "response_received", "task_reminder", "status_changed"],
+      enum: ["task_assigned", "response_received", "task_reminder", "status_changed" , "approval_requested",  // manager submits task → notifies admin
+    "task_approved",       // admin approves → notifies manager
+    "task_rejected",],
       required: true,
     },
     message: { type: String, required: true },

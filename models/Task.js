@@ -82,7 +82,11 @@ const TaskSchema = new mongoose.Schema(
         _id: false,
       },
     ],
-
+    approvalStatus: {
+  type: String,
+  enum: ["pending", "approved", "rejected"],
+  default: "approved",
+},
     checkboxes: [
       {
         id: String,

@@ -4,7 +4,7 @@ const Task = require("../models/Task");
 const Notification = require("../models/Notification");
 const User = require("../models/Users");
 const { getIO } = require("../sockets/socket");
-
+const UserTaskStatus = require("../models/UserTaskStatus");
 const protect = require("../middleware/authMiddleware");
 const allowRoles = require("../middleware/roleMiddleware");
 
@@ -53,9 +53,13 @@ router.get("/", protect, async (req, res) => {
 });
 
 // =======================
-// ✅ CREATE TASK (super_admin only)
+// ✅ CREATE TASK
+// — super_admin: creates approved immediately
+// — manager + personal: creates approved immediately
+// — manager + assigned to others: creates with approvalStatus "pending"
+// — user: personal tasks only, always approved
 // =======================
-router.post("/", protect, allowRoles("super_admin"), async (req, res) => {
+router.post("/", protect, allowRoles("super_admin", "manager", "user"), async (req, res) => {
   try {
     const {
       title,
@@ -70,16 +74,45 @@ router.post("/", protect, allowRoles("super_admin"), async (req, res) => {
       dropdownButtons,
       quickReplies,
       ctaButtons,
-      checkboxes,                     // ✅ NEW
+      checkboxes,
+      approvalStatus, // sent by frontend — "pending" or "approved"
     } = req.body;
 
     if (!title || !dueDate) {
       return res.status(400).json({ error: "Title and dueDate are required" });
     }
 
+    const userRole = req.user.role;
+
+    // ── Role-based assignment rules ──────────────────────────────
+    // Users can only create personal tasks
+    if (userRole === "user" && !isPersonal) {
+      return res.status(403).json({ error: "Users can only create personal tasks" });
+    }
+
     let assignedUserIds = assignedTo || [];
     if (isPersonal) {
+      // Personal task → assigned only to creator, always approved
       assignedUserIds = [req.user.id];
+    }
+
+    // ── Determine approval status ────────────────────────────────
+    // Admin tasks are always approved.
+    // Manager personal tasks are always approved.
+    // Manager tasks assigned to others → pending (frontend sends "pending").
+    // User personal tasks are always approved.
+    let resolvedApprovalStatus = "approved";
+    if (
+      userRole === "manager" &&
+      !isPersonal &&
+      assignedUserIds.length > 0
+    ) {
+      resolvedApprovalStatus = "pending";
+    }
+    // Allow frontend to explicitly override only toward "pending" (not approved)
+    // so a manager can't self-approve by sending "approved" in the body.
+    if (approvalStatus === "pending" && userRole === "manager") {
+      resolvedApprovalStatus = "pending";
     }
 
     const task = new Task({
@@ -96,7 +129,8 @@ router.post("/", protect, allowRoles("super_admin"), async (req, res) => {
       dropdownButtons: dropdownButtons || [],
       quickReplies: quickReplies || [],
       ctaButtons: ctaButtons || [],
-      checkboxes: checkboxes || [],   // ✅ NEW
+      checkboxes: checkboxes || [],
+      approvalStatus: resolvedApprovalStatus, // ✅ NEW field on Task model
     });
 
     await task.save();
@@ -105,19 +139,120 @@ router.post("/", protect, allowRoles("super_admin"), async (req, res) => {
 
     const io = getIO();
 
-    // Create notifications for assigned users
-    for (const uid of assignedUserIds) {
+    if (resolvedApprovalStatus === "approved") {
+      // Notify assigned users only if task is live
+      for (const uid of assignedUserIds) {
+        // Skip notifying the creator if they assigned to themselves (personal)
+        if (uid.toString() === req.user.id && isPersonal) continue;
+
+        const notif = await Notification.create({
+          userId: uid,
+          type: "task_assigned",
+          message: `New task assigned: ${task.title}`,
+          taskId: task._id,
+        });
+        io.to(uid.toString()).emit("newNotification", notif);
+        io.to(uid.toString()).emit("newTask", task);
+      }
+    } else {
+      // Notify all admins that a task is pending their approval
+      const admins = await User.find({ role: "super_admin" }).select("_id").lean();
+      for (const admin of admins) {
+        const notif = await Notification.create({
+          userId: admin._id,
+          type: "approval_requested",
+          message: `${req.user.name} submitted a task for approval: "${task.title}"`,
+          taskId: task._id,
+        });
+        io.to(admin._id.toString()).emit("newNotification", notif);
+        io.to(admin._id.toString()).emit("newTask", task);
+      }
+    }
+
+    res.status(201).json({ success: true, data: task });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =======================
+// ✅ APPROVE / REJECT TASK (super_admin only)
+// PATCH /:id/approve  { approvalStatus: "approved" | "rejected" }
+// =======================
+router.patch("/:id/approve", protect, allowRoles("super_admin"), async (req, res) => {
+  try {
+    const { approvalStatus } = req.body;
+
+    if (!["approved", "rejected"].includes(approvalStatus)) {
+      return res.status(400).json({ error: "approvalStatus must be 'approved' or 'rejected'" });
+    }
+
+    const task = await Task.findById(req.params.id)
+      .populate("createdBy", "name phone role")
+      .populate("assignedTo", "name phone role")
+      .populate("responses.userId", "name phone role");
+
+    if (!task) return res.status(404).json({ error: "Task not found" });
+    if (task.approvalStatus !== "pending") {
+      return res.status(400).json({ error: "Task is not pending approval" });
+    }
+
+    if (approvalStatus === "rejected") {
+      // Delete the task and notify the manager who created it
+      const io = getIO();
+      const notif = await Notification.create({
+        userId: task.createdBy._id,
+        type: "task_rejected",
+        message: `Your task "${task.title}" was rejected by admin`,
+        taskId: task._id,
+      });
+      io.to(task.createdBy._id.toString()).emit("newNotification", notif);
+      io.to(task.createdBy._id.toString()).emit("taskDeleted", { taskId: task._id });
+
+      await Notification.deleteMany({ taskId: task._id });
+      await Task.findByIdAndDelete(task._id);
+
+      return res.json({ success: true, message: "Task rejected and deleted" });
+    }
+
+    // ── Approved ─────────────────────────────────────────────────
+    task.approvalStatus = "approved";
+    await task.save();
+
+    const populatedTask = await Task.findById(task._id)
+      .populate("createdBy", "name phone role")
+      .populate("assignedTo", "name phone role")
+      .populate("responses.userId", "name phone role");
+
+    const io = getIO();
+
+    // Notify the manager their task was approved
+    const approvedNotif = await Notification.create({
+      userId: task.createdBy._id,
+      type: "task_approved",
+      message: `Your task "${task.title}" was approved`,
+      taskId: task._id,
+    });
+    io.to(task.createdBy._id.toString()).emit("newNotification", approvedNotif);
+    io.to(task.createdBy._id.toString()).emit("taskUpdated", populatedTask);
+
+    // Now notify assignees — task is live
+    for (const assignee of populatedTask.assignedTo) {
+      const uid = assignee._id.toString();
+      // Don't notify the creator if they're also an assignee
+      if (uid === task.createdBy._id.toString()) continue;
+
       const notif = await Notification.create({
         userId: uid,
         type: "task_assigned",
         message: `New task assigned: ${task.title}`,
         taskId: task._id,
       });
-      io.to(uid.toString()).emit("newNotification", notif);
-      io.to(uid.toString()).emit("newTask", task);
+      io.to(uid).emit("newNotification", notif);
+      io.to(uid).emit("newTask", populatedTask);
     }
 
-    res.status(201).json({ success: true, data: task });
+    res.json({ success: true, data: populatedTask });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -140,7 +275,7 @@ router.put("/:id", protect, allowRoles("super_admin", "manager"), async (req, re
     const allowedUpdates = [
       "title", "description", "dueDate", "reminderAt", "priority",
       "attachments", "inputFields", "dropdownButtons", "quickReplies",
-      "ctaButtons", "checkboxes",        // ✅ NEW
+      "ctaButtons", "checkboxes",
     ];
     const updates = {};
     allowedUpdates.forEach((field) => {
@@ -165,13 +300,24 @@ router.put("/:id", protect, allowRoles("super_admin", "manager"), async (req, re
 });
 
 // =======================
-// ✅ DELETE TASK (super_admin only)
+// ✅ DELETE TASK
+// — super_admin: can delete any task
+// — manager: can only delete their own pending tasks (rejected flow)
 // =======================
-router.delete("/:id", protect, allowRoles("super_admin"), async (req, res) => {
+router.delete("/:id", protect, allowRoles("super_admin", "manager"), async (req, res) => {
   try {
-    const task = await Task.findByIdAndDelete(req.params.id);
+    const task = await Task.findById(req.params.id);
     if (!task) return res.status(404).json({ error: "Task not found" });
 
+    const isAdmin = req.user.role === "super_admin";
+    const isCreator = task.createdBy.toString() === req.user.id;
+
+    // Managers can only delete their own tasks (e.g. after rejection)
+    if (!isAdmin && !isCreator) {
+      return res.status(403).json({ error: "Not authorized to delete this task" });
+    }
+
+    await Task.findByIdAndDelete(req.params.id);
     await Notification.deleteMany({ taskId: req.params.id });
 
     const io = getIO();
@@ -200,14 +346,18 @@ router.post("/:id/response", protect, async (req, res) => {
       return res.status(403).json({ error: "Not authorized" });
     }
 
+    // Block responses on pending-approval tasks for non-admins
+    if (task.approvalStatus === "pending" && !isAdmin) {
+      return res.status(403).json({ error: "Task is pending approval — responses locked" });
+    }
+
     const { message, formData } = req.body;
 
-    // Ensure formData includes checkboxSelections
     const safeFormData = {
       inputFields: formData?.inputFields || [],
       dropdownSelections: formData?.dropdownSelections || [],
       quickReplySelected: formData?.quickReplySelected || "",
-      checkboxSelections: formData?.checkboxSelections || [],   // ✅ NEW
+      checkboxSelections: formData?.checkboxSelections || [],
     };
 
     const response = {
@@ -227,7 +377,6 @@ router.post("/:id/response", protect, async (req, res) => {
 
     const io = getIO();
 
-    // Notify creator
     const notif = await Notification.create({
       userId: task.createdBy,
       type: "response_received",
@@ -237,7 +386,6 @@ router.post("/:id/response", protect, async (req, res) => {
     io.to(task.createdBy.toString()).emit("newNotification", notif);
     io.to(task.createdBy.toString()).emit("taskResponse", populatedTask);
 
-    // Notify other assignees
     task.assignedTo.forEach((uid) => {
       if (uid.toString() !== req.user.id) {
         io.to(uid.toString()).emit("taskUpdated", populatedTask);
@@ -252,6 +400,8 @@ router.post("/:id/response", protect, async (req, res) => {
 
 // =======================
 // ✅ UPDATE TASK STATUS
+// — Admin: real update, broadcasted to all
+// — Non-admin: 200 OK but status is NOT saved (frontend handles locally)
 // =======================
 router.patch("/:id/status", protect, async (req, res) => {
   try {
@@ -271,23 +421,36 @@ router.patch("/:id/status", protect, async (req, res) => {
       return res.status(400).json({ error: "Invalid status" });
     }
 
-    task.status = status;
-    await task.save();
+    if (isAdmin) {
+      // ── Admin: persist to DB + broadcast ──────────────────────
+      task.status = status;
+      await task.save();
 
-    const populatedTask = await Task.findById(task._id)
-      .populate("createdBy", "name phone role")
-      .populate("assignedTo", "name phone role")
-      .populate("responses.userId", "name phone role");
+      const populatedTask = await Task.findById(task._id)
+        .populate("createdBy", "name phone role")
+        .populate("assignedTo", "name phone role")
+        .populate("responses.userId", "name phone role");
 
-    const io = getIO();
-    const recipients = [task.createdBy.toString(), ...task.assignedTo.map((id) => id.toString())];
-    recipients.forEach((uid) => {
-      if (uid !== req.user.id) {
-        io.to(uid).emit("taskUpdated", populatedTask);
-      }
-    });
+      const io = getIO();
+      const recipients = [task.createdBy.toString(), ...task.assignedTo.map((id) => id.toString())];
+      recipients.forEach((uid) => {
+        if (uid !== req.user.id) {
+          io.to(uid).emit("taskUpdated", populatedTask);
+        }
+      });
 
-    res.json({ success: true, data: populatedTask });
+      return res.json({ success: true, data: populatedTask });
+    } else {
+      // ── Non-admin: personal progress only — do NOT save to DB ──
+      // Return the task as-is so the frontend can apply its local override.
+      // The frontend (localStorage) is the source of truth for this user's status.
+      const populatedTask = await Task.findById(task._id)
+        .populate("createdBy", "name phone role")
+        .populate("assignedTo", "name phone role")
+        .populate("responses.userId", "name phone role");
+
+      return res.json({ success: true, data: populatedTask, localOnly: true });
+    }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -334,5 +497,63 @@ router.patch("/notifications/read-all", protect, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+
+// GET all per-user statuses (for tasks the current user can see)
+router.get("/user-statuses", protect, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    let taskFilter = {};
+    if (userRole !== "super_admin") {
+      taskFilter = { assignedTo: userId };
+    }
+    const visibleTaskIds = (await Task.find(taskFilter).select("_id").lean())
+      .map(t => t._id.toString());
+
+    const statuses = await UserTaskStatus.find({
+      userId: { $in: userRole === "super_admin"
+        ? (await User.find({ role: { $ne: "super_admin" } }).select("_id"))
+        : [userId] },
+      taskId: { $in: visibleTaskIds },
+    }).lean();
+
+    res.json({ success: true, data: statuses });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Upsert per-user status (used by non-admins)
+router.patch("/:id/user-status", protect, async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id);
+    if (!task) return res.status(404).json({ error: "Task not found" });
+
+    const isAssignee = task.assignedTo.some(a => a.toString() === req.user.id);
+    if (!isAssignee && req.user.role !== "super_admin")
+      return res.status(403).json({ error: "Not assigned" });
+
+    const { status } = req.body;
+    const valid = ["pending", "in_progress", "completed", "cancelled"];
+    if (!valid.includes(status))
+      return res.status(400).json({ error: "Invalid status" });
+
+    const record = await UserTaskStatus.findOneAndUpdate(
+      { userId: req.user.id, taskId: task._id },
+      { status },
+      { upsert: true, new: true }
+    );
+
+    // For personal progress, also notify the task creator? optional.
+
+    res.json({ success: true, data: record });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 
 module.exports = router;
