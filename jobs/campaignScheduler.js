@@ -49,7 +49,7 @@ function resolveTemplateText(templateText, variableValues, contact) {
 
 // 🔥 SEND MESSAGE FUNCTION
 async function sendMessageToContact(contact, campaign, io) {
-  const creatorPhone = campaign.createdBy?.phone;
+  const creatorPhone = campaign.createdBy?.phone || campaign.createdBy?.mobile;
   const targetPhone = contact.mobile;
 
   if (!creatorPhone || !targetPhone) {
@@ -148,12 +148,22 @@ async function processCampaigns() {
     scheduledDateTime: { $lte: now },
   }).populate("createdBy", "phone name"); // ✅ get phone from User model
 
+
   if (campaigns.length === 0) return;
 
   console.log(`🚀 Found ${campaigns.length} campaigns to process`);
 
-  for (const campaign of campaigns) {
-    console.log("📤 Running campaign:", campaign._id, "| Creator:", campaign.createdBy?.phone);
+for (const campaign of campaigns) {
+  console.log("📤 Running campaign:", campaign._id, "| Creator:", campaign.createdBy?.phone);
+
+  // ✅ Skip if creator not found
+  if (!campaign.createdBy) {
+    console.error("❌ Skipping campaign — createdBy user not found:", campaign._id);
+    campaign.status = "failed";
+    campaign.errorLog = "Creator user not found in database";
+    await campaign.save();
+    continue;
+  }
 
     let recipients = [];
 

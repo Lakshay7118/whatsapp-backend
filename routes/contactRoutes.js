@@ -19,16 +19,12 @@ router.get(
       let filter = {};
 
       if (req.user.role === "super_admin") {
-        // ✅ Admin: filter by managerId if provided, else show all
-        if (managerId) filter.createdBy = managerId;
-        // if ?all=true or no filter → show everything
-      } else if (req.user.role === "manager") {
-        // ✅ Manager: only their own contacts
-        filter.createdBy = req.user.id;
-      } else {
-        // ✅ User: only their own contacts
-        filter.createdBy = req.user.id;
-      }
+  if (managerId) filter.createdBy = managerId;
+  // else no filter → show all
+} else {
+  // ✅ manager and user both see ALL approved contacts
+  filter.status = "approved";
+}
 
       if (tag) filter.tags = tag;
 
@@ -89,7 +85,7 @@ router.get(
 router.post(
   "/contacts",
   protect,
-  allowRoles("super_admin", "manager", "user"),
+  allowRoles("super_admin", "manager"),
   async (req, res) => {
     try {
       const { name, mobile, tags, source, role } = req.body;

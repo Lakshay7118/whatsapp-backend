@@ -18,10 +18,10 @@ router.get(
     try {
       let filter = {};
 
-      // 🔥 OPTIONAL: manager sees only own tags
-      if (req.user.role === "manager") {
-        filter.createdBy = req.user.id;
-      }
+      // ❌ REMOVE this restriction
+      // if (req.user.role === "manager") {
+      //   filter.createdBy = req.user.id;
+      // }
 
       const tags = await Tag.find(filter)
         .sort({ createdAt: -1 });
