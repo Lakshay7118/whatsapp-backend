@@ -36,6 +36,13 @@ router.post(
         chat = await Chat.create({
           participants: [senderPhone, receiverPhone],
         });
+      } else {
+        // ✅ FIX: remove sender from deletedBy so it reappears after refresh
+        chat = await Chat.findByIdAndUpdate(
+          chat._id,
+          { $pull: { deletedBy: senderPhone } },
+          { new: true }
+        );
       }
 
       return res.json(chat);
@@ -46,7 +53,6 @@ router.post(
     }
   }
 );
-
 
 // =======================
 // ✅ GET USER CHATS (ALL ROLES)

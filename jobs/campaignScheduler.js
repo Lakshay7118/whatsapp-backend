@@ -52,6 +52,8 @@ async function sendMessageToContact(contact, campaign, io) {
   const creatorPhone = campaign.createdBy?.phone || campaign.createdBy?.mobile;
   const targetPhone = contact.mobile;
 
+  
+
   if (!creatorPhone || !targetPhone) {
     console.error("❌ Missing phone:", { creatorPhone, targetPhone });
     return;
@@ -137,6 +139,34 @@ async function sendMessageToContact(contact, campaign, io) {
   return msg;
 }
 
+
+function getNextRunTime(lastRun, recurrence) {
+  const interval = recurrence.interval || 1;
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000; // 5h30m in ms
+
+  // Convert lastRun to IST
+  const utcMs = new Date(lastRun).getTime();
+  const istMs = utcMs + IST_OFFSET;
+  const istDate = new Date(istMs);
+
+  switch (recurrence.type) {
+    case "hourly":
+      istDate.setHours(istDate.getHours() + interval);
+      break;
+    case "daily":
+      istDate.setDate(istDate.getDate() + interval);
+      break;
+    case "weekly":
+      istDate.setDate(istDate.getDate() + interval * 7);
+      break;
+    case "monthly":
+      istDate.setMonth(istDate.getMonth() + interval);
+      break;
+  }
+
+  // Convert back to UTC for MongoDB
+  return new Date(istDate.getTime() - IST_OFFSET);
+}
 // 🔥 MAIN CRON FUNCTION
 async function processCampaigns() {
   const now = new Date();
@@ -145,7 +175,7 @@ async function processCampaigns() {
   const campaigns = await Campaign.find({
     status: "scheduled",
     approvalStatus: "approved",
-    scheduledDateTime: { $lte: now },
+    nextRun: { $lte: now },
   }).populate("createdBy", "phone name"); // ✅ get phone from User model
 
 
@@ -215,9 +245,16 @@ for (const campaign of campaigns) {
       }
     }
 
-    // ✅ mark campaign as sent
-    campaign.status = "sent";
-    await campaign.save();
+   // ✅ Fix — reschedule if recurring
+if (campaign.recurrence?.type && campaign.recurrence.type !== "one-time") {
+  const next = getNextRunTime(campaign.nextRun, campaign.recurrence);
+  campaign.nextRun = next;
+  campaign.status = "scheduled";
+  campaign.sentCount = 0;
+} else {
+  campaign.status = "sent";
+}
+await campaign.save();
 
     console.log(`✅ Campaign ${campaign._id} completed — sent to ${campaign.sentCount} contacts`);
   }
