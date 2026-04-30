@@ -151,6 +151,7 @@ router.post("/", protect, async (req, res) => {
     await Chat.findByIdAndUpdate(chatId, {
       lastMessage: lastMessageText,
       updatedAt: new Date(),
+       $set: { deletedBy: [] },
     });
 
     // ================= SOCKET =================

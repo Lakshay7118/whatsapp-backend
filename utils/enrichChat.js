@@ -3,15 +3,18 @@ const Message = require("../models/Message");
 const User = require("../models/Users");
 const Contact = require("../models/Contact");
 
-
 async function enrichChat(chat, currentUserPhone) {
   try {
     // ── GROUP CHAT ──────────────────────────────────
     if (chat.isGroup) {
-      const unreadCount = await Message.countDocuments({
-        chatId: chat._id,
-        "readBy.user": { $ne: currentUserPhone }
-      });
+
+      // ✅ FIXED: Don't count messages sent BY the current user
+      // Only count messages not yet read by current user
+     const unreadCount = await Message.countDocuments({
+  chatId: chat._id,
+  sender: { $ne: currentUserPhone },
+  "readBy.user": { $ne: currentUserPhone }, // ✅ simple — readBy: [] always exists now
+});
 
       const lastMsg = await Message.findOne({ chatId: chat._id })
         .sort({ createdAt: -1 });
@@ -22,6 +25,8 @@ async function enrichChat(chat, currentUserPhone) {
           ? "📷 Photo"
           : lastMsg?.messageType === "file"
           ? "📎 File"
+          : lastMsg?.messageType === "template"
+          ? "📋 Template"                        // ✅ added template type
           : "");
 
       const lastMessageTimeRaw = lastMsg?.createdAt || chat.updatedAt || new Date();
@@ -50,7 +55,7 @@ async function enrichChat(chat, currentUserPhone) {
       };
     }
 
-    // ── INDIVIDUAL CHAT ────────────────────
+    // ── INDIVIDUAL CHAT ────────────────────────────
     const otherPhone = chat.participants.find(
       (p) => String(p) !== String(currentUserPhone)
     );
@@ -58,16 +63,18 @@ async function enrichChat(chat, currentUserPhone) {
     let otherUser = await User.findOne({ phone: otherPhone });
     let otherContact = await Contact.findOne({ mobile: otherPhone });
 
-    const name = otherUser?.name || otherContact?.name || otherPhone || "Unknown";
+    const name =
+      otherUser?.name || otherContact?.name || otherPhone || "Unknown";
 
     const unreadCount = await Message.countDocuments({
-      chatId: chat._id,
-      sender: otherPhone,
-      "readBy.user": { $ne: currentUserPhone }
-    });
+  chatId: chat._id,
+  sender: otherPhone,
+  "readBy.user": { $ne: currentUserPhone }, // ✅ simple
+});
 
-    const lastMsg = await Message.findOne({ chatId: chat._id })
-      .sort({ createdAt: -1 });
+    const lastMsg = await Message.findOne({ chatId: chat._id }).sort({
+      createdAt: -1,
+    });
 
     const lastMessageText =
       lastMsg?.text ||
@@ -75,9 +82,12 @@ async function enrichChat(chat, currentUserPhone) {
         ? "📷 Photo"
         : lastMsg?.messageType === "file"
         ? "📎 File"
+        : lastMsg?.messageType === "template"
+        ? "📋 Template"                          // ✅ added template type
         : "");
 
-    const lastMessageTimeRaw = lastMsg?.createdAt || chat.updatedAt || new Date();
+    const lastMessageTimeRaw =
+      lastMsg?.createdAt || chat.updatedAt || new Date();
 
     return {
       _id: chat._id,
@@ -102,9 +112,8 @@ async function enrichChat(chat, currentUserPhone) {
     };
   } catch (err) {
     console.error("ENRICH CHAT ERROR:", err);
-    return chat; // 🔥 fallback (never crash)
+    return chat;
   }
 }
-
 
 module.exports = enrichChat;

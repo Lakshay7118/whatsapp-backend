@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-
 const CampaignSchema = new mongoose.Schema(
   {
     campaignName: { type: String, required: true, trim: true },
@@ -19,7 +18,7 @@ const CampaignSchema = new mongoose.Schema(
 
     tagIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Tag" }],
     contactIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Contact" }],
-    groupIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Group" }],
+    groupIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Chat" }],
     manualNumbers: [{ type: String, trim: true }],
 
     templateId: {
@@ -62,14 +61,12 @@ const CampaignSchema = new mongoose.Schema(
       default: "scheduled",
     },
 
-    // ✅ NEW: Internal approval status for manager submissions
     approvalStatus: {
       type: String,
       enum: ["pending_approval", "approved", "rejected"],
-      default: "approved", // admin-created campaigns auto-approved
+      default: "approved",
     },
 
-    // ✅ FIXED: ObjectId ref to User
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -78,6 +75,11 @@ const CampaignSchema = new mongoose.Schema(
 
     nextRun: { type: Date },
     sentCount: { type: Number, default: 0 },
+
+    // ✅ ADD THESE TWO:
+    runCount:      { type: Number, default: 0 },   // how many times this recurring campaign has fired
+    lastSentCount: { type: Number, default: 0 },   // sent count of the most recent run
+
     errorLog: { type: String, default: "" },
   },
   { timestamps: true }

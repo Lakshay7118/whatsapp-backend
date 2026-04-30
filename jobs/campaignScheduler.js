@@ -16,9 +16,6 @@ function resolveTemplateText(templateText, variableValues, contact) {
     return text;
   }
 
-  console.log("🔄 Original text:", text);
-  console.log("📋 variableValues:", JSON.stringify(variableValues, null, 2));
-
   Object.entries(variableValues).forEach(([key, mapping]) => {
     let value = "";
 
@@ -35,24 +32,18 @@ function resolveTemplateText(templateText, variableValues, contact) {
       value = "N/A";
     }
 
-    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const regex = new RegExp(`\\{\\{${escapedKey}\\}\\}`, "g");
-
-    const before = text;
     text = text.replace(regex, value);
-    console.log(`🔁 {{${key}}} → "${value}" (replaced: ${before !== text})`);
   });
 
-  console.log("✅ FINAL RESOLVED TEXT:", text);
   return text;
 }
 
-// 🔥 SEND MESSAGE FUNCTION
+// 🔥 SEND MESSAGE TO 1-ON-1 CHAT (for tags/contacts/manual)
 async function sendMessageToContact(contact, campaign, io) {
   const creatorPhone = campaign.createdBy?.phone || campaign.createdBy?.mobile;
   const targetPhone = contact.mobile;
-
-  
 
   if (!creatorPhone || !targetPhone) {
     console.error("❌ Missing phone:", { creatorPhone, targetPhone });
@@ -61,6 +52,7 @@ async function sendMessageToContact(contact, campaign, io) {
 
   let chat = await Chat.findOne({
     participants: { $all: [creatorPhone, targetPhone] },
+    isGroup: false,
   });
 
   const isNewChat = !chat;
@@ -72,7 +64,7 @@ async function sendMessageToContact(contact, campaign, io) {
 
   const template = await Template.findById(campaign.templateId).lean();
   if (!template) {
-    console.error("❌ Template not found:", campaign._id);
+    console.error("❌ Template not found:", campaign.templateId);
     return;
   }
 
@@ -113,9 +105,9 @@ async function sendMessageToContact(contact, campaign, io) {
     status: "sent",
     sentAt: new Date(),
     templateMeta,
+    readBy: [],
   });
 
-  // ✅ FIX 2: Update chat's lastMessage so it sorts to top in chat list
   await Chat.findByIdAndUpdate(chat._id, {
     lastMessage: "📋 Template",
     updatedAt: new Date(),
@@ -123,31 +115,119 @@ async function sendMessageToContact(contact, campaign, io) {
 
   const msgPayload = { ...msg.toObject(), chatId: chat._id };
 
-  // ✅ FIX 1a: Emit to chatId room (for anyone already viewing this chat)
   io.to(String(chat._id)).emit("newMessage", msgPayload);
-
-  // ✅ FIX 1b: Emit to creator's personal room so their chat list refreshes
   io.to(creatorPhone).emit("chatUpdated", {
     chatId: chat._id,
     isNewChat,
     lastMessage: "📋 Template",
     participants: [creatorPhone, targetPhone],
   });
+  io.to(targetPhone).emit("chatUpdated", {
+    chatId: chat._id,
+    isNewChat,
+    lastMessage: "📋 Template",
+    participants: [creatorPhone, targetPhone],
+  });
 
-  console.log("📡 Emitted to room:", String(chat._id), "| Notified:", creatorPhone);
-
+  console.log("📡 Emitted to room:", String(chat._id), "| creator:", creatorPhone, "| recipient:", targetPhone);
   return msg;
 }
 
+// 🔥 NEW: SEND MESSAGE TO GROUP CHAT DIRECTLY
+// One message visible to ALL members inside the group
+async function sendMessageToGroupChat(groupChat, campaign, io, groupName, creatorPhone) {
+  const template = await Template.findById(campaign.templateId).lean();
+  if (!template) {
+    console.error("❌ Template not found:", campaign.templateId);
+    return;
+  }
 
+  // ✅ Patch variables — replace name-type with groupName
+  const patchedVariableValues = Object.fromEntries(
+    Object.entries(campaign.variableValues || {}).map(([key, mapping]) => [
+      key,
+      mapping.type === "name"
+        ? { type: "custom", value: groupName }
+        : mapping,
+    ])
+  );
+
+  // Use groupName as contact name so resolveTemplateText works
+  const groupContact = { name: groupName, mobile: creatorPhone };
+
+  const resolvedBody = resolveTemplateText(template.format || "", patchedVariableValues, groupContact);
+  const resolvedHeader = resolveTemplateText(template.name || "", patchedVariableValues, groupContact);
+  const resolvedFooter = template.footer
+    ? resolveTemplateText(template.footer, patchedVariableValues, groupContact)
+    : "";
+
+  let mediaUrl = null;
+  if (template.mediaType === "Image" && template.imageFile?.url) mediaUrl = template.imageFile.url;
+  else if (template.mediaType === "Video" && template.videoFile?.url) mediaUrl = template.videoFile.url;
+
+  const templateMeta = {
+    templateId: template._id,
+    header: resolvedHeader,
+    body: resolvedBody,
+    footer: resolvedFooter,
+    resolvedText: resolvedBody,
+    mediaType: template.mediaType || "None",
+    mediaUrl,
+    variables: patchedVariableValues,
+    actions: {
+      ctaButtons: template.ctaButtons || [],
+      quickReplies: template.quickReplies || [],
+      copyCodeButtons: template.copyCodeButtons || [],
+      dropdownButtons: template.dropdownButtons || [],
+      inputFields: template.inputFields || [],
+    },
+    carouselItems: template.carouselItems || [],
+  };
+
+  // ✅ Save message to the GROUP chat (not 1-on-1)
+  const msg = await Message.create({
+    chatId: groupChat._id,
+    sender: creatorPhone,
+    text: resolvedBody,
+    messageType: "template",
+    status: "sent",
+    sentAt: new Date(),
+    templateMeta,
+    readBy: [],
+  });
+
+  // ✅ Update group chat lastMessage
+  await Chat.findByIdAndUpdate(groupChat._id, {
+    lastMessage: "📋 Template",
+    updatedAt: new Date(),
+  });
+
+  const msgPayload = { ...msg.toObject(), chatId: groupChat._id };
+
+  // ✅ Emit to group chat room — all members viewing it see it instantly
+  io.to(String(groupChat._id)).emit("newMessage", msgPayload);
+
+  // ✅ Notify every participant so their chat list refreshes
+  groupChat.participants.forEach(phone => {
+    io.to(phone).emit("chatUpdated", {
+      chatId: groupChat._id,
+      isNewChat: false,
+      lastMessage: "📋 Template",
+      participants: groupChat.participants,
+    });
+  });
+
+  console.log(`📡 Emitted to GROUP room: ${groupChat._id} | Group: "${groupName}" | Members: ${groupChat.participants.length}`);
+  return msg;
+}
+
+// ⏱ NEXT RUN TIME CALCULATOR
 function getNextRunTime(lastRun, recurrence) {
   const interval = recurrence.interval || 1;
-  const IST_OFFSET = 5.5 * 60 * 60 * 1000; // 5h30m in ms
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
 
-  // Convert lastRun to IST
   const utcMs = new Date(lastRun).getTime();
-  const istMs = utcMs + IST_OFFSET;
-  const istDate = new Date(istMs);
+  const istDate = new Date(utcMs + IST_OFFSET);
 
   switch (recurrence.type) {
     case "hourly":
@@ -164,60 +244,80 @@ function getNextRunTime(lastRun, recurrence) {
       break;
   }
 
-  // Convert back to UTC for MongoDB
   return new Date(istDate.getTime() - IST_OFFSET);
 }
+
 // 🔥 MAIN CRON FUNCTION
 async function processCampaigns() {
   const now = new Date();
 
-  // ✅ FIX 3: populate createdBy to get phone + only approved campaigns
   const campaigns = await Campaign.find({
     status: "scheduled",
     approvalStatus: "approved",
     nextRun: { $lte: now },
-  }).populate("createdBy", "phone name"); // ✅ get phone from User model
-
+  }).populate("createdBy", "phone name");
 
   if (campaigns.length === 0) return;
 
   console.log(`🚀 Found ${campaigns.length} campaigns to process`);
 
-for (const campaign of campaigns) {
-  console.log("📤 Running campaign:", campaign._id, "| Creator:", campaign.createdBy?.phone);
+  const io = getIO();
 
-  // ✅ Skip if creator not found
-  if (!campaign.createdBy) {
-    console.error("❌ Skipping campaign — createdBy user not found:", campaign._id);
-    campaign.status = "failed";
-    campaign.errorLog = "Creator user not found in database";
-    await campaign.save();
-    continue;
-  }
+  for (const campaign of campaigns) {
+    console.log("📤 Running campaign:", campaign._id, "| Creator:", campaign.createdBy?.phone);
 
-    let recipients = [];
-
-    // ✅ TAGS
-    if (campaign.audienceType === "tags") {
-      recipients = await Contact.find({
-        tags: { $in: campaign.tagIds },
-      });
-    }
-
-    // ✅ CONTACTS
-    else if (campaign.audienceType === "contact") {
-      recipients = await Contact.find({
-        _id: { $in: campaign.contactIds },
-      });
-    }
-
-    // ⚠️ GROUP (not implemented)
-    else if (campaign.audienceType === "group") {
-      console.log("⚠️ Group sending not implemented yet");
+    if (!campaign.createdBy) {
+      console.error("❌ Skipping — createdBy not found:", campaign._id);
+      campaign.status = "failed";
+      campaign.errorLog = "Creator user not found in database";
+      await campaign.save();
       continue;
     }
 
-    // ✅ MANUAL
+    let recipients = [];
+    let groupHandled = false;
+
+    // ── TAGS ──
+    if (campaign.audienceType === "tags") {
+      recipients = await Contact.find({ tags: { $in: campaign.tagIds } });
+    }
+
+    // ── CONTACTS ──
+    else if (campaign.audienceType === "contact") {
+      recipients = await Contact.find({ _id: { $in: campaign.contactIds } });
+    }
+
+    // ── GROUP — sends ONE message to the group chat directly ──
+    else if (campaign.audienceType === "group") {
+      groupHandled = true;
+
+      const groupChats = await Chat.find({
+        _id: { $in: campaign.groupIds },
+        isGroup: true,
+      }).lean();
+
+      if (groupChats.length === 0) {
+        console.warn("⚠️ No group chats found for campaign:", campaign._id);
+      }
+
+      const creatorPhone = campaign.createdBy?.phone || campaign.createdBy?.mobile;
+
+      for (const groupChat of groupChats) {
+        const groupName = groupChat.groupName || "Team";
+        console.log(`👥 Sending to GROUP "${groupName}" (${groupChat.participants.length} members)`);
+
+        try {
+          // ✅ ONE message to the group chat — visible to all members
+          await sendMessageToGroupChat(groupChat, campaign, io, groupName, creatorPhone);
+          campaign.sentCount += 1;
+          console.log(`✅ Sent to group "${groupName}"`);
+        } catch (err) {
+          console.error(`❌ Failed for group "${groupName}":`, err.message);
+        }
+      }
+    }
+
+    // ── MANUAL ──
     else if (campaign.audienceType === "manual") {
       recipients = campaign.manualNumbers.map((num) => ({
         mobile: num,
@@ -225,42 +325,45 @@ for (const campaign of campaigns) {
       }));
     }
 
-    console.log(`👥 Found ${recipients.length} recipients`);
+    // ── SEND (tags / contacts / manual) ──
+    if (!groupHandled) {
+      if (recipients.length === 0) {
+        console.warn("⚠️ No recipients for campaign:", campaign._id);
+        campaign.status = "sent";
+        await campaign.save();
+        continue;
+      }
 
-    if (recipients.length === 0) {
-      console.warn("⚠️ No recipients found for campaign:", campaign._id);
-      campaign.status = "sent";
-      await campaign.save();
-      continue;
-    }
+      console.log(`👥 Found ${recipients.length} recipients`);
 
-    const io = getIO();
-
-    for (const contact of recipients) {
-      try {
-        await sendMessageToContact(contact, campaign, io);
-        campaign.sentCount += 1;
-      } catch (err) {
-        console.error("❌ Send failed for contact:", contact.mobile, "| Error:", err.message);
+      for (const contact of recipients) {
+        try {
+          await sendMessageToContact(contact, campaign, io);
+          campaign.sentCount += 1;
+        } catch (err) {
+          console.error("❌ Send failed for:", contact.mobile, "|", err.message);
+        }
       }
     }
 
-   // ✅ Fix — reschedule if recurring
+    // ── RESCHEDULE OR MARK SENT ──
+    // ── RESCHEDULE OR MARK SENT ──
 if (campaign.recurrence?.type && campaign.recurrence.type !== "one-time") {
-  const next = getNextRunTime(campaign.nextRun, campaign.recurrence);
-  campaign.nextRun = next;
+  campaign.nextRun = getNextRunTime(campaign.nextRun, campaign.recurrence);
   campaign.status = "scheduled";
-  campaign.sentCount = 0;
+  campaign.runCount = (campaign.runCount || 0) + 1;        // ✅ track how many times it ran
+  campaign.lastSentCount = campaign.sentCount;              // ✅ save this run's count before reset
+  campaign.sentCount = 0;                                   // reset for next run
 } else {
   campaign.status = "sent";
 }
-await campaign.save();
 
-    console.log(`✅ Campaign ${campaign._id} completed — sent to ${campaign.sentCount} contacts`);
+await campaign.save();
+console.log(`✅ Campaign ${campaign._id} done | run #${campaign.runCount} | sent: ${campaign.lastSentCount}`);
   }
 }
 
-// ⏱ run every 10 seconds
+// ⏱ Run every 10 seconds
 cron.schedule("*/10 * * * * *", () => {
   processCampaigns().catch(console.error);
 });
