@@ -56,7 +56,35 @@ router.get("/", protect, async (req, res) => {
     }).sort({ updatedAt: -1 });
 
     const enrichedChats = await Promise.all(
-      chats.map((chat) => enrichChat(chat, userPhone))
+      chats.map(async (chat) => {
+        const enriched = await enrichChat(chat, userPhone);
+
+        // ✅ Use stored lastMessage object OR fetch from Message collection
+        let lastMessage = chat.lastMessage;
+
+        // If lastMessage is a string (old format) or missing, fetch from DB
+        if (!lastMessage || !lastMessage.createdAt) {
+          const lastMsg = await Message.findOne({
+            chatId: chat._id,
+            deletedBy: { $ne: userPhone },
+          })
+            .sort({ createdAt: -1 })
+            .lean();
+
+          lastMessage = lastMsg
+            ? {
+                text: lastMsg.text || "",
+                messageType: lastMsg.messageType || "text",
+                fileName: lastMsg.fileName || null,
+                createdAt: lastMsg.createdAt,
+                sender: lastMsg.sender,
+                isDeleted: lastMsg.isDeleted || false,
+              }
+            : null;
+        }
+
+        return { ...enriched, lastMessage };
+      })
     );
 
     res.json(enrichedChats);

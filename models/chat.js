@@ -15,7 +15,14 @@ const ChatSchema = new mongoose.Schema(
     groupAvatar: { type: String, default: null },
     admin: { type: String, default: null }, // phone number of group creator
 
-    lastMessage: String,
+lastMessage: {
+  text:        { type: String, default: "" },
+  messageType: { type: String, default: "text" },
+  fileName:    { type: String, default: null },
+  createdAt:   { type: Date, default: null },
+  sender:      { type: String, default: null },
+  isDeleted:   { type: Boolean, default: false },
+},
 
     status: {
       type: String,

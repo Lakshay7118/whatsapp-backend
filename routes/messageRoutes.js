@@ -148,11 +148,18 @@ router.post("/", protect, async (req, res) => {
     if (messageType === "file") lastMessageText = `📎 ${fileName || "File"}`;
     if (messageType === "template") lastMessageText = "📋 Template";
 
-    await Chat.findByIdAndUpdate(chatId, {
-      lastMessage: lastMessageText,
-      updatedAt: new Date(),
-       $set: { deletedBy: [] },
-    });
+   await Chat.findByIdAndUpdate(chatId, {
+  lastMessage: {
+    text: text || "",
+    messageType: messageType || "text",
+    fileName: fileName || null,
+    createdAt: msg.createdAt,
+    sender: sender,
+    isDeleted: false,
+  },
+  updatedAt: new Date(),
+  $set: { deletedBy: [] },
+});
 
     // ================= SOCKET =================
     const io = getIO();
