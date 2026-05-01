@@ -6,6 +6,8 @@ const ContactSchema = new mongoose.Schema(
 
     mobile: { type: String, required: true, unique: true },
 
+    email: { type: String, default: null }, // ✅ ADD THIS — OTP will be sent here
+
     tags: [{ type: mongoose.Schema.Types.ObjectId, ref: "Tag" }],
 
     source: {
@@ -20,14 +22,12 @@ const ContactSchema = new mongoose.Schema(
       default: "user",
     },
 
-    // ✅ NEW — approval system
     status: {
       type: String,
       enum: ["pending", "approved", "rejected"],
       default: "pending",
     },
 
-    // ✅ FIXED — changed from String to ObjectId so we can populate name/role
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

@@ -15,22 +15,20 @@ router.get(
   allowRoles("super_admin", "manager", "user"),
   async (req, res) => {
     try {
-      const { tag, managerId, all } = req.query;
+      const { tag, managerId } = req.query;
       let filter = {};
 
       if (req.user.role === "super_admin") {
-  if (managerId) filter.createdBy = managerId;
-  // else no filter → show all
-} else {
-  // ✅ manager and user both see ALL approved contacts
-  filter.status = "approved";
-}
+        if (managerId) filter.createdBy = managerId;
+      } else {
+        filter.status = "approved";
+      }
 
       if (tag) filter.tags = tag;
 
       const contacts = await Contact.find(filter)
         .populate("tags")
-        .populate("createdBy", "name phone role"); // ✅ show who created
+        .populate("createdBy", "name phone role");
 
       res.json(contacts);
     } catch (err) {
@@ -41,7 +39,7 @@ router.get(
 
 
 // =======================
-// ✅ GET ALL MANAGERS (for admin panel)
+// ✅ GET ALL MANAGERS
 // =======================
 router.get(
   "/contacts/managers",
@@ -60,7 +58,7 @@ router.get(
 
 
 // =======================
-// ✅ GET PENDING CONTACTS (for admin approval)
+// ✅ GET PENDING CONTACTS
 // =======================
 router.get(
   "/contacts/pending",
@@ -80,7 +78,7 @@ router.get(
 
 
 // =======================
-// ✅ CREATE CONTACT (ALL ROLES)
+// ✅ CREATE CONTACT
 // =======================
 router.post(
   "/contacts",
@@ -88,7 +86,7 @@ router.post(
   allowRoles("super_admin", "manager"),
   async (req, res) => {
     try {
-      const { name, mobile, tags, source, role } = req.body;
+      const { name, mobile, email, tags, source, role } = req.body; // ✅ email added
 
       if (!mobile) {
         return res.status(400).json({ error: "Mobile number required" });
@@ -99,17 +97,17 @@ router.post(
         return res.status(400).json({ error: "Contact already exists" });
       }
 
-      // ✅ super_admin → auto approved, others → pending
       const status = req.user.role === "super_admin" ? "approved" : "pending";
 
       const contact = new Contact({
         name: name || "UNKNOWN",
         mobile,
+        email: email || null,       // ✅ save email
         tags: tags || [],
         source: source || "MANUAL",
         role: role || "user",
         status,
-        createdBy: req.user.id, // ✅ from token
+        createdBy: req.user.id,
       });
 
       await contact.save();
@@ -124,7 +122,7 @@ router.post(
 
 
 // =======================
-// ✅ APPROVE CONTACT (SUPER ADMIN ONLY)
+// ✅ APPROVE CONTACT
 // =======================
 router.put(
   "/contacts/:id/approve",
@@ -149,7 +147,7 @@ router.put(
 
 
 // =======================
-// ✅ REJECT CONTACT (SUPER ADMIN ONLY)
+// ✅ REJECT CONTACT
 // =======================
 router.put(
   "/contacts/:id/reject",
@@ -174,7 +172,7 @@ router.put(
 
 
 // =======================
-// ✅ UPDATE CONTACT (ADMIN + MANAGER)
+// ✅ UPDATE CONTACT
 // =======================
 router.put(
   "/contacts/:id",
@@ -182,13 +180,12 @@ router.put(
   allowRoles("super_admin", "manager"),
   async (req, res) => {
     try {
-      const { name, mobile, tags, source, role } = req.body;
+      const { name, mobile, email, tags, source, role } = req.body; // ✅ email added
       const contactId = req.params.id;
 
       const contact = await Contact.findById(contactId);
       if (!contact) return res.status(404).json({ error: "Contact not found" });
 
-      // ✅ manager can only update own contacts
       if (
         req.user.role === "manager" &&
         contact.createdBy.toString() !== req.user.id
@@ -196,7 +193,6 @@ router.put(
         return res.status(403).json({ error: "Not authorized" });
       }
 
-      // ✅ non-admin edits go back to pending
       if (req.user.role !== "super_admin") {
         contact.status = "pending";
       }
@@ -208,6 +204,7 @@ router.put(
       }
 
       if (name !== undefined) contact.name = name || "UNKNOWN";
+      if (email !== undefined) contact.email = email || null;  // ✅ update email
       if (tags !== undefined) contact.tags = tags;
       if (source !== undefined) contact.source = source;
 
@@ -230,7 +227,7 @@ router.put(
 
 
 // =======================
-// ✅ DELETE CONTACT (ONLY SUPER ADMIN)
+// ✅ DELETE CONTACT
 // =======================
 router.delete(
   "/contacts/:id",
@@ -241,7 +238,7 @@ router.delete(
       const deleted = await Contact.findByIdAndDelete(req.params.id);
       if (!deleted) return res.status(404).json({ error: "Contact not found" });
       res.json({ success: true });
-    } catch (err) { 
+    } catch (err) {
       res.status(500).json({ error: err.message });
     }
   }

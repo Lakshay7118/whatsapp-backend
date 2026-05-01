@@ -2,21 +2,22 @@ const mongoose = require("mongoose");
 
 const UserSchema = new mongoose.Schema({
   name: String,
-  email: { type: String, unique: true, sparse: true }, // sparse allows null/missing
+  email: { type: String, unique: true, sparse: true },
   password: String,
-
-  phone: { type: String, unique: true, sparse: true }, // ✅ ADD THIS
-
+  phone: { type: String, unique: true, sparse: true },
   role: {
     type: String,
     enum: ["super_admin", "manager", "user"],
     default: "user",
   },
-
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
   },
+
+  // ✅ OTP fields
+  otp: { type: String },
+  otpExpiry: { type: Date },
 
 }, { timestamps: true });
 
