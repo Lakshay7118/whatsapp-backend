@@ -1,23 +1,18 @@
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,          // ✅ use 587 instead of default 465
-  secure: false,      // ✅ must be false for 587
-  family: 4,          // ✅ force IPv4 (fixes your ENETUNREACH error)
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const sendEmail = async ({ to, subject, html }) => {
-  await transporter.sendMail({
-    from: `"WhatsApp App" <${process.env.EMAIL_USER}>`,
+  const { error } = await resend.emails.send({
+    from: "WhatsApp App <onboarding@resend.dev>",
     to,
     subject,
     html,
   });
+
+  if (error) {
+    throw new Error(error.message);
+  }
 };
 
 module.exports = sendEmail;
