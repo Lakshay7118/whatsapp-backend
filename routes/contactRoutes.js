@@ -1,6 +1,8 @@
 // routes/contactRoutes.js
 const express = require("express");
+const bcrypt = require("bcryptjs");
 const Contact = require("../models/Contact");
+const User = require("../models/Users");
 const protect = require("../middleware/authMiddleware");
 const allowRoles = require("../middleware/roleMiddleware");
 const router = express.Router();
@@ -47,7 +49,6 @@ router.get(
   allowRoles("super_admin"),
   async (req, res) => {
     try {
-      const User = require("../models/Users");
       const managers = await User.find({ role: "manager" }).select("name phone role createdAt");
       res.json(managers);
     } catch (err) {
@@ -86,7 +87,7 @@ router.post(
   allowRoles("super_admin", "manager"),
   async (req, res) => {
     try {
-      const { name, mobile, email, tags, source, role } = req.body; // ✅ email added
+      const { name, mobile, email, password, tags, source, role } = req.body;
 
       if (!mobile) {
         return res.status(400).json({ error: "Mobile number required" });
@@ -102,7 +103,7 @@ router.post(
       const contact = new Contact({
         name: name || "UNKNOWN",
         mobile,
-        email: email || null,       // ✅ save email
+        email: email || null,
         tags: tags || [],
         source: source || "MANUAL",
         role: role || "user",
@@ -111,6 +112,30 @@ router.post(
       });
 
       await contact.save();
+
+      // ✅ If email + password provided, create or update the User with hashed password
+      if (email && password) {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        let user = await User.findOne({ phone: mobile });
+
+        if (user) {
+          user.email = email.toLowerCase();
+          user.password = hashedPassword;
+          user.name = name || user.name;
+          user.role = role || user.role;
+          await user.save();
+        } else {
+          await User.create({
+            name: name || "UNKNOWN",
+            phone: mobile,
+            email: email.toLowerCase(),
+            password: hashedPassword,
+            role: role || "user",
+            createdBy: req.user.id,
+          });
+        }
+      }
+
       const populated = await contact.populate("tags");
       res.status(201).json(populated);
 
@@ -180,7 +205,7 @@ router.put(
   allowRoles("super_admin", "manager"),
   async (req, res) => {
     try {
-      const { name, mobile, email, tags, source, role } = req.body; // ✅ email added
+      const { name, mobile, email, password, tags, source, role } = req.body;
       const contactId = req.params.id;
 
       const contact = await Contact.findById(contactId);
@@ -204,7 +229,7 @@ router.put(
       }
 
       if (name !== undefined) contact.name = name || "UNKNOWN";
-      if (email !== undefined) contact.email = email || null;  // ✅ update email
+      if (email !== undefined) contact.email = email || null;
       if (tags !== undefined) contact.tags = tags;
       if (source !== undefined) contact.source = source;
 
@@ -216,6 +241,31 @@ router.put(
       }
 
       await contact.save();
+
+      // ✅ Update email and/or password on the linked User document
+      if (req.user.role === "super_admin" && (email || password)) {
+        const phoneLookup = mobile || contact.mobile;
+        let user = await User.findOne({ phone: phoneLookup });
+
+        if (user) {
+          if (email) user.email = email.toLowerCase();
+          if (password) user.password = await bcrypt.hash(password, 10);
+          if (name) user.name = name;
+          if (role) user.role = role;
+          await user.save();
+        } else if (email && password) {
+          // Create user if doesn't exist yet
+          await User.create({
+            name: name || contact.name,
+            phone: phoneLookup,
+            email: email.toLowerCase(),
+            password: await bcrypt.hash(password, 10),
+            role: role || contact.role,
+            createdBy: req.user.id,
+          });
+        }
+      }
+
       const populated = await contact.populate("tags");
       res.json(populated);
 

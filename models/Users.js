@@ -14,11 +14,6 @@ const UserSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
   },
-
-  // ✅ OTP fields
-  otp: { type: String },
-  otpExpiry: { type: Date },
-
 }, { timestamps: true });
 
 module.exports = mongoose.model("User", UserSchema);
