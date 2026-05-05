@@ -3,68 +3,120 @@ const { Server } = require("socket.io");
 
 let io;
 
+// phone → Set of socketIds (BEST approach instead of count)
+const onlineUsers = new Map();
+const lastSeenMap = {};
+
 const initSocket = (server) => {
   io = new Server(server, {
-    cors: { origin: "*" }
+    cors: { origin: "*" },
+    pingTimeout: 5000,
+    pingInterval: 10000,
   });
 
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
 
-    // ── Join a specific chat room (real-time messaging)
+    // ================= CHAT ROOM =================
     socket.on("joinChat", (chatId) => {
       socket.join(chatId);
-      console.log(`Socket ${socket.id} joined chat ${chatId}`);
     });
 
-    // ── Join personal room via phone number
-    // Used for campaign messages, direct user notifications
+    // ================= USER ONLINE =================
     socket.on("joinUserRoom", (userPhone) => {
-      if (userPhone) {
-        socket.join(userPhone);
-        console.log(`Socket ${socket.id} joined user room: ${userPhone}`);
+      if (!userPhone) return;
+
+      // ❌ prevent duplicate join from same socket
+      if (socket.userPhone === userPhone) return;
+
+      socket.userPhone = userPhone;
+      socket.join(userPhone);
+
+      let userSockets = onlineUsers.get(userPhone);
+
+      if (!userSockets) {
+        userSockets = new Set();
+        onlineUsers.set(userPhone, userSockets);
       }
+
+      userSockets.add(socket.id);
+
+      delete lastSeenMap[userPhone];
+
+      emitPresence();
     });
 
-    // ── Typing indicator
+    // ================= USER LEAVE =================
+    socket.on("leaveUserRoom", (userPhone) => {
+      if (!userPhone) return;
+
+      const userSockets = onlineUsers.get(userPhone);
+      if (!userSockets) return;
+
+      userSockets.delete(socket.id);
+
+      if (userSockets.size === 0) {
+        onlineUsers.delete(userPhone);
+        lastSeenMap[userPhone] = new Date().toISOString();
+      }
+
+      emitPresence();
+    });
+
+    // ================= DISCONNECT =================
+    socket.on("disconnect", () => {
+      const userPhone = socket.userPhone;
+      if (!userPhone) return;
+
+      const userSockets = onlineUsers.get(userPhone);
+      if (!userSockets) return;
+
+      userSockets.delete(socket.id);
+
+      if (userSockets.size === 0) {
+        onlineUsers.delete(userPhone);
+        lastSeenMap[userPhone] = new Date().toISOString();
+      }
+
+      emitPresence();
+    });
+
+    // ================= OTHER EVENTS =================
     socket.on("typing", ({ chatId, user }) => {
       socket.to(chatId).emit("userTyping", { chatId, user });
     });
 
-    // ── Mark messages as read (real-time blue ticks)
-    socket.on("markRead", async ({ chatId, userPhone }) => {
-      socket.to(chatId).emit("messagesSeen", { chatId, user: userPhone });
+    socket.on("markRead", ({ chatId }) => {
+      socket.to(chatId).emit("messagesSeen", { chatId });
     });
 
-    // ── Soft delete: notify only the user who deleted
-    // Backend calls: io.to(userPhone).emit("chatDeleted", ...)
-    // Frontend removes chat from that user's list only
     socket.on("chatDeleted", ({ chatId, userPhone }) => {
       io.to(userPhone).emit("chatDeleted", { chatId, userPhone });
     });
 
-    // ── Permanent delete: notify ALL participants in the chat room
-    // Backend calls: io.to(phone).emit("chatDeletedPermanently", ...) for each participant
-    // Frontend removes chat from everyone's list
     socket.on("chatDeletedPermanently", ({ chatId }) => {
       io.to(chatId).emit("chatDeletedPermanently", { chatId });
     });
 
-    // ── Pin chat: notify the user's personal room
     socket.on("pinChat", ({ chatId, userPhone, pinned }) => {
       io.to(userPhone).emit("chatPinned", { chatId, pinned });
     });
 
-    // ── Clear chat: notify the user's personal room
     socket.on("clearChat", ({ chatId, userPhone }) => {
       io.to(userPhone).emit("chatCleared", { chatId });
     });
-
-    socket.on("disconnect", () => {
-      console.log("User disconnected:", socket.id);
-    });
   });
 
+  // ================= EMIT PRESENCE =================
+const emitPresence = () => {
+  // ✅ clean stale lastSeen for any user who is currently online
+  onlineUsers.forEach((_, phone) => { delete lastSeenMap[phone]; });
+  
+  io.emit("onlineUsers", {
+    users: Array.from(onlineUsers.keys()),
+    lastSeen: lastSeenMap,
+  });
+};
   return io;
 };
 
@@ -73,4 +125,4 @@ const getIO = () => {
   return io;
 };
 
-module.exports = { initSocket, getIO };
+module.exports = { initSocket, getIO };7
