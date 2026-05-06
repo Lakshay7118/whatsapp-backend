@@ -20,7 +20,7 @@ const MessageSchema = new mongoose.Schema(
 
     messageType: {
       type: String,
-      enum: ["text", "image", "video", "audio", "file", "template"],
+      enum: ["text", "image", "video", "audio", "file", "template","contact"],
       default: "text",
     },
 
@@ -31,8 +31,11 @@ const MessageSchema = new mongoose.Schema(
       enum: ["sent", "delivered", "seen"],
       default: "sent",
     },
+contactName:  { type: String, default: null },
+contactPhone: { type: String, default: null },
+contactEmail: { type: String, default: null },
 
-    fileUrl:  { type: String, default: null },
+fileUrl:  { type: String, default: null },
     fileType: {
       type: String,
       enum: ["image", "video", "audio", "file", null],

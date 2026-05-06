@@ -23,6 +23,7 @@ const upload = multer({
 const allowedTypes = [
   "image/",
   "video/",
+  "audio/",          // ✅ ADD THIS LINE
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -64,10 +65,15 @@ router.post("/", protect, upload.single("file"), async (req, res) => {
     }
 
     // ================= DETERMINE TYPE =================
-    const isImage = file.mimetype.startsWith("image/");
-    const isVideo = file.mimetype.startsWith("video/");
-    const resource_type = isVideo ? "video" : isImage ? "image" : "raw";
-    const messageType = isImage ? "image" : isVideo ? "video" : "file";
+// ================= DETERMINE TYPE =================
+const isImage = file.mimetype.startsWith("image/");
+const isVideo = file.mimetype.startsWith("video/");
+const isAudio = file.mimetype.startsWith("audio/");   // ✅ ADD
+
+// Cloudinary uses "video" resource_type for audio files too
+const resource_type = isVideo || isAudio ? "video" : isImage ? "image" : "raw";  // ✅ CHANGE
+
+const messageType = isImage ? "image" : isVideo ? "video" : isAudio ? "audio" : "file";  // ✅ CHANGE
 
     // ================= SIZE VALIDATION =================
     if (file.size > 50 * 1024 * 1024) {

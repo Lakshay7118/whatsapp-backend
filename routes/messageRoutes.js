@@ -51,16 +51,19 @@ router.post("/", protect, async (req, res) => {
     const sender = req.user.phone;
     const userRole = req.user.role;
 
-    const {
-      chatId,
-      text,
-      messageType,
-      fileUrl,
-      fileName,
-      fileSize,
-      templateMeta,
-      receiverPhone,
-    } = req.body;
+ const {
+  chatId,
+  text,
+  messageType,
+  fileUrl,
+  fileName,
+  fileSize,
+  templateMeta,
+  receiverPhone,
+  contactName,
+  contactPhone,
+  contactEmail,
+} = req.body;
 
     let resolvedTemplateMeta = null;
 
@@ -129,18 +132,21 @@ router.post("/", protect, async (req, res) => {
     }
 
     // ================= CREATE MESSAGE =================
-    const msg = await Message.create({
-      chatId,
-      sender,
-      text: text || "",
-      messageType: messageType || "text",
-      fileUrl,
-      fileName,
-      fileSize,
-      templateMeta: messageType === "template" ? resolvedTemplateMeta : null,
-      status: "sent",
-      readBy: [],
-    });
+   const msg = await Message.create({
+  chatId,
+  sender,
+  text: text || "",
+  messageType: messageType || "text",
+  fileUrl,
+  fileName,
+  fileSize,
+  templateMeta: messageType === "template" ? resolvedTemplateMeta : null,
+  contactName: contactName || null,
+  contactPhone: contactPhone || null,
+  contactEmail: contactEmail || null,
+  status: "sent",
+  readBy: [],
+});
 
     // ================= UPDATE CHAT =================
     let lastMessageText = text;
